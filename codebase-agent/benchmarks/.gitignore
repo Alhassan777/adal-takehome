@@ -1,0 +1,4 @@
+results/
+vendor/
+__pycache__/
+*.pyc

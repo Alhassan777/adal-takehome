@@ -1,0 +1,11 @@
+services:
+  agent:
+    build: .
+    volumes:
+      - ./:/app
+      - ${REPO_PATH:-.}:/workspace/repo:ro
+      - ./.cache:/app/.cache
+    environment:
+      - PYTHONPATH=/app/src
+      - CODEBASE_AGENT_DEV_LOG=${CODEBASE_AGENT_DEV_LOG:-0}
+    working_dir: /app

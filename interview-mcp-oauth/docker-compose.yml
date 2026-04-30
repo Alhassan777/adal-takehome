@@ -1,0 +1,12 @@
+services:
+  interview-mcp-oauth:
+    build: .
+    stdin_open: true
+    tty: true
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - .:/workspace
+
+  # Run: docker compose run --rm interview-mcp-oauth python test_notion.py
