@@ -27,25 +27,35 @@ User question
 
 ## Quick Start
 
-### Typical Usage (session-based)
+### Interactive Session (recommended)
 
 ```bash
-# 1. Initialize a session (builds index + summaries + starts LSP)
-codebase-agent init /path/to/repo
+# Start a long-lived session with file watching
+codebase-agent chat /path/to/repo
 
-# 2. Ask questions (all three intelligence layers active)
-codebase-agent ask /path/to/repo -q "How does authentication work?"
-codebase-agent ask /path/to/repo -q "What calls create_user?"
+# You'll get an interactive prompt:
+# ask> How does authentication work?
+# ask> What calls @services.py?
+# ask> /exit
 ```
 
-The `ask` command auto-initializes if no session cache exists, so you can skip `init` for one-off use.
+The `chat` command builds the index once, watches for file changes, and lets you ask multiple questions without restarting.
+
+### Single Question
+
+```bash
+# One-shot question (no interactive prompt)
+codebase-agent ask /path/to/repo "How does authentication work?"
+```
+
+The `ask` command auto-initializes if no session cache exists.
 
 ### Docker
 
 ```bash
 docker compose build
 docker compose run agent init /workspace/repo
-docker compose run agent ask /workspace/repo -q "How does authentication work?"
+docker compose run agent ask /workspace/repo "How does authentication work?"
 ```
 
 ### Local Installation
@@ -61,7 +71,8 @@ codebase-agent --help
 | Command | Description |
 |---------|-------------|
 | `init <repo>` | Initialize session: index + summaries + LSP warmup |
-| `ask <repo>` | Ask a question (auto-inits if needed) |
+| `chat <repo>` | Interactive session: ask multiple questions (long-lived) |
+| `ask <repo> <question>` | Ask a single question (non-interactive, auto-inits) |
 | `index <repo>` | Build index only (no summaries, no LSP) |
 | `map <repo>` | Display a hierarchical annotated repo map |
 | `symbols <repo> <query>` | Search for symbols by name |
@@ -75,27 +86,26 @@ codebase-agent --help
 
 ### Flags
 
-- `--no-lsp` (init, ask): Skip Pyright LSP startup
-- `--no-summaries` (init, ask): Skip NL summary generation
+- `--no-lsp` (init, ask, chat): Skip Pyright LSP startup
+- `--no-summaries` (init, ask, chat): Skip NL summary generation
 - `--watch` (init, index): Watch for file changes and re-index incrementally
 - `--with-summaries` (map): Include NL summaries in the repo map
 - `--llm-summaries` (summarize): Use LLM for richer summaries
-- `-q / --question` (ask): Pass question directly (non-interactive mode)
-- `--sandbox local|docker` (ask): RLM execution sandbox. `local` is currently supported; `docker` fails fast until an isolated executor is implemented.
-- `--verbose / -v` (ask): Show per-tool result previews
-- `--quiet` (ask): Only show the final JSON answer (suppresses progress)
-- `--dev-log` (ask): Enable developer logging and save trace to `.cache/traces/`
+- `--sandbox local|docker` (ask, chat): RLM execution sandbox. `local` is currently supported; `docker` fails fast until an isolated executor is implemented.
+- `--verbose / -v` (ask, chat): Show per-tool result previews
+- `--quiet` (ask, chat): Only show the final JSON answer (suppresses progress)
+- `--dev-log` (ask, chat): Enable developer logging and save trace to `.cache/traces/`
 - `--last / --session` (trace): View the last trace or all session traces
 
 ## @-Mention File References
 
-In interactive mode, type `@` followed by a filename to reference specific files:
+Use `@` followed by a filename in your question to reference specific files:
 
-```
-ask> How does @services.py call @models.py?
+```bash
+codebase-agent ask /path/to/repo "How does @services.py call @models.py?"
 ```
 
-Autocomplete suggests matching file paths. Mentioned files are injected as context into the agent's workflow.
+Mentioned files are resolved and injected as context into the agent's workflow.
 
 ## Summary System
 
@@ -105,9 +115,20 @@ Three-tier NL summaries act as a semantic navigation layer:
 - **Symbol summaries**: 1-2 sentence descriptions for key classes/functions
 - **Directory summaries**: folder-level role and contents overview
 
-Summaries are generated from deterministic static analysis (tree-sitter, import graph, docstrings, call edges). Optional LLM enrichment available via `--llm-summaries`.
+Summaries are generated from deterministic static analysis (tree-sitter, import graph, docstrings, call edges) by default. Use `--llm-summaries` to enrich file-level summaries with gpt-4o-mini for richer purpose and responsibility descriptions:
 
-Cached by file content hash -- only regenerated when files change.
+```bash
+codebase-agent summarize /path/to/repo --llm-summaries
+```
+
+LLM summaries are batched (5 files per API call) and cached by file content hash -- only new or changed files are re-summarized. If the API key is missing or a batch fails, the system falls back to heuristic summaries automatically.
+
+Configure the LLM model and batch size via environment variables:
+
+```bash
+SUMMARY_LLM_MODEL=gpt-4o-mini   # model for summary generation
+SUMMARY_BATCH_SIZE=5             # files per LLM batch call
+```
 
 ## LSP Integration
 
