@@ -4,6 +4,7 @@ import hashlib
 import threading
 from collections import defaultdict
 from pathlib import Path
+from typing import Callable
 
 import msgpack
 
@@ -207,7 +208,11 @@ def load_index(index_path: str) -> RepoIndex:
     return RepoIndex.model_validate(data)
 
 
-def start_watcher(root_path: str, index: RepoIndex) -> None:
+def start_watcher(
+    root_path: str,
+    index: RepoIndex,
+    on_refresh: Callable[[RepoIndex], None] | None = None,
+) -> None:
     """Start a background file watcher for incremental re-indexing."""
     try:
         from watchfiles import watch
@@ -218,14 +223,21 @@ def start_watcher(root_path: str, index: RepoIndex) -> None:
     for changes in watch(str(root)):
         for _change_type, path in changes:
             if Path(path).suffix in SUPPORTED_EXTENSIONS:
-                _update_index_for_file(index, path, root)
+                _update_index_for_file(index, path, root, on_refresh)
 
 
-def _update_index_for_file(index: RepoIndex, abs_path: str, root: Path) -> None:
+def _update_index_for_file(
+    index: RepoIndex,
+    abs_path: str,
+    root: Path,
+    on_refresh: Callable[[RepoIndex], None] | None = None,
+) -> None:
     """Refresh the active index after a file change and persist the new cache."""
     refreshed = build_index(str(root))
     save_index_to_disk(refreshed, str(root))
     _replace_index_contents(index, refreshed)
+    if on_refresh is not None:
+        on_refresh(index)
 
 
 def _replace_index_contents(target: RepoIndex, source: RepoIndex) -> None:

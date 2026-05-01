@@ -11,6 +11,7 @@ from ..config import ExecutionMode, SandboxMode, DEFAULT_EXECUTION_MODE, DEFAULT
 from ..models import RepoIndex
 from .indexer import build_index, is_index_cache_fresh, load_fresh_index, save_index_to_disk, start_watcher
 from .lsp_client import PyrightLSP
+from .mentions import MentionResolver
 
 logger = logging.getLogger("codebase_agent.session")
 
@@ -35,6 +36,7 @@ class Session:
 
     index: RepoIndex
     root_path: str
+    mention_resolver: MentionResolver
     lsp: PyrightLSP | None = None
     summaries_built: bool = False
     config: SessionConfig = field(default_factory=SessionConfig)
@@ -84,6 +86,7 @@ def init_session(
     session = Session(
         index=idx,
         root_path=root,
+        mention_resolver=MentionResolver.from_index(idx, root),
         lsp=lsp,
         summaries_built=summaries_built,
         config=config,
@@ -96,7 +99,7 @@ def init_session(
 
     # Phase 4: Start file watcher if requested
     if config.watch:
-        _start_watcher_thread(root, idx)
+        _start_watcher_thread(session)
 
     return session
 
@@ -140,11 +143,15 @@ def _start_lsp_checked(root_path: str) -> PyrightLSP | None:
     return None
 
 
-def _start_watcher_thread(root_path: str, index: RepoIndex) -> None:
+def _start_watcher_thread(session: Session) -> None:
     """Start the file watcher in a daemon thread."""
     thread = threading.Thread(
         target=start_watcher,
-        args=(root_path, index),
+        args=(
+            session.root_path,
+            session.index,
+            lambda refreshed: session.mention_resolver.refresh(refreshed, session.root_path),
+        ),
         daemon=True,
     )
     thread.start()
