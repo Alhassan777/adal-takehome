@@ -25,6 +25,7 @@ class SymbolRecord(BaseModel):
     signature: str | None = None
     docstring: str | None = None
     parent: str | None = None
+    decorators: list[str] = Field(default_factory=list)
 
 
 class ImportRecord(BaseModel):

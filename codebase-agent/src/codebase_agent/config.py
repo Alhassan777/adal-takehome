@@ -24,6 +24,9 @@ DEFAULT_SANDBOX_MODE = SandboxMode(os.environ.get("RLM_SANDBOX", "local"))
 OPENAI_MODEL: str = os.environ.get("OPENAI_MODEL", "gpt-4o")
 OPENAI_SUB_MODEL: str = os.environ.get("OPENAI_SUB_MODEL", "gpt-4o-mini")
 
+SUMMARY_LLM_MODEL: str = os.environ.get("SUMMARY_LLM_MODEL", "gpt-4o-mini")
+SUMMARY_BATCH_SIZE: int = int(os.environ.get("SUMMARY_BATCH_SIZE", "5"))
+
 MAX_ADAPTIVE_ROUNDS: int = 15
 MAX_RLM_ITERATIONS: int = 10
 MAX_SUB_MODEL_DEPTH: int = 2

@@ -141,6 +141,7 @@ def _walk_for_symbols(
                     signature=_extract_signature(target, source),
                     docstring=_extract_docstring(body, source),
                     parent=parent_class,
+                    decorators=_get_decorators(target, source),
                 )
             )
 
@@ -162,6 +163,7 @@ def _walk_for_symbols(
                     signature=_extract_signature(target, source),
                     docstring=_extract_docstring(body, source),
                     parent=parent_class,
+                    decorators=_get_decorators(target, source),
                 )
             )
 

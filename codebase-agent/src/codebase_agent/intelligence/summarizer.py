@@ -1,12 +1,16 @@
 """Three-tier NL summary system: file, symbol, directory summaries."""
 
+from __future__ import annotations
+
 import hashlib
+import json
+import logging
 from collections import defaultdict
 from pathlib import Path
 
 import msgpack
 
-from ..config import INDEX_DIR, SUMMARY_FILE
+from ..config import INDEX_DIR, SUMMARY_BATCH_SIZE, SUMMARY_FILE, SUMMARY_LLM_MODEL
 from ..models import (
     CachedSummary,
     DirectorySummary,
@@ -16,6 +20,8 @@ from ..models import (
     SymbolSummary,
 )
 
+logger = logging.getLogger(__name__)
+
 SIDE_EFFECT_PATTERNS = [
     "write", "save", "send", "delete", "remove", "post", "put",
     "patch", "create", "insert", "update", "emit", "publish",
@@ -23,9 +29,65 @@ SIDE_EFFECT_PATTERNS = [
 ]
 
 EXTERNAL_SERVICE_PATTERNS = [
-    "requests", "httpx", "aiohttp", "boto3", "stripe",
-    "redis", "celery", "kafka", "rabbitmq", "smtp",
+    # HTTP clients
+    "requests", "httpx", "aiohttp", "urllib3",
+    # Cloud providers
+    "boto3", "botocore", "google.cloud", "azure",
+    # Databases (SQL)
+    "sqlalchemy", "psycopg", "pymysql", "asyncpg", "aiomysql",
+    "sqlite3", "alembic",
+    # Databases (NoSQL)
+    "pymongo", "motor", "elasticsearch", "opensearch",
+    "cassandra", "couchdb",
+    # Caching / queues
+    "redis", "aioredis", "celery", "kafka", "confluent_kafka",
+    "rabbitmq", "pika", "kombu", "dramatiq", "rq",
+    # AI / LLM providers
+    "openai", "anthropic", "cohere", "mistral", "groq",
+    "litellm", "langchain", "llama_index",
+    # Payments
+    "stripe", "braintree", "paypalrestsdk",
+    # Email / SMS / push
+    "smtp", "sendgrid", "mailgun", "postmark",
+    "twilio", "vonage", "firebase_admin",
+    # Observability
+    "sentry_sdk", "datadog", "newrelic", "opentelemetry",
+    "prometheus_client", "statsd",
+    # Auth / secrets
+    "jwt", "authlib", "python_jose", "hvac",
+    # Storage / CDN
+    "paramiko", "fabric", "ftplib",
+    # Web frameworks (indicates HTTP boundary)
+    "fastapi", "flask", "django", "starlette", "tornado",
+    "aiohttp.web", "grpc",
+    # Supabase / Firebase / BaaS
+    "supabase", "firebase",
 ]
+
+ROUTE_DECORATOR_PATTERNS = [
+    "app.get", "app.post", "app.put", "app.patch", "app.delete",
+    "app.route", "app.options", "app.head",
+    "router.get", "router.post", "router.put", "router.patch", "router.delete",
+    "router.route", "router.options", "router.head",
+    "blueprint.route", "blueprint.get", "blueprint.post",
+    "api_view", "action",
+    "route",
+]
+
+
+def _extract_route_path(decorator: str) -> str:
+    """Extract the URL path from a route decorator string like '@app.get("/users")'."""
+    start = decorator.find("(")
+    if start == -1:
+        return ""
+    inner = decorator[start + 1:]
+    for quote in ('"', "'"):
+        qi = inner.find(quote)
+        if qi != -1:
+            end_q = inner.find(quote, qi + 1)
+            if end_q != -1:
+                return inner[qi + 1 : end_q]
+    return ""
 
 
 def build_summaries(
@@ -39,6 +101,9 @@ def build_summaries(
 
     file_summaries: list[FileSummary] = []
     new_cache: dict[str, CachedSummary] = {}
+
+    # Collect uncached files that need generation
+    pending: list[tuple[str, str, _FactBundle, list]] = []
 
     for file_rec in index.files:
         abs_path = Path(root_path) / file_rec.path
@@ -57,17 +122,41 @@ def build_summaries(
 
         file_symbols = [s for s in index.symbols if s.file_path == file_rec.path]
         file_imports = [i for i in index.imports if i.file_path == file_rec.path]
-
         facts = _extract_facts(file_rec.path, file_symbols, file_imports, index)
-        file_summary = _generate_file_summary(file_rec.path, facts)
-        symbol_summaries = _generate_symbol_summaries(file_symbols, file_rec.path)
+        pending.append((file_rec.path, file_hash, facts, file_symbols))
 
-        file_summaries.append(file_summary)
-        new_cache[file_rec.path] = CachedSummary(
-            file_hash=file_hash,
-            file_summary=file_summary,
-            symbol_summaries=symbol_summaries,
-        )
+    if use_llm and pending:
+        # Process in batches through the LLM
+        for batch_start in range(0, len(pending), SUMMARY_BATCH_SIZE):
+            batch = pending[batch_start : batch_start + SUMMARY_BATCH_SIZE]
+            llm_batch = [(path, facts, syms) for path, _hash, facts, syms in batch]
+            llm_results = _generate_llm_summaries_batch(llm_batch)
+
+            for path, file_hash, facts, file_symbols in batch:
+                if path in llm_results:
+                    file_summary = _merge_llm_into_summary(path, facts, llm_results[path])
+                else:
+                    file_summary = _generate_file_summary(path, facts)
+                symbol_summaries = _generate_symbol_summaries(file_symbols, path)
+
+                file_summaries.append(file_summary)
+                new_cache[path] = CachedSummary(
+                    file_hash=file_hash,
+                    file_summary=file_summary,
+                    symbol_summaries=symbol_summaries,
+                )
+    else:
+        # Heuristic-only path
+        for path, file_hash, facts, file_symbols in pending:
+            file_summary = _generate_file_summary(path, facts)
+            symbol_summaries = _generate_symbol_summaries(file_symbols, path)
+
+            file_summaries.append(file_summary)
+            new_cache[path] = CachedSummary(
+                file_hash=file_hash,
+                file_summary=file_summary,
+                symbol_summaries=symbol_summaries,
+            )
 
     _save_cached_summaries(new_cache, str(cache_dir / SUMMARY_FILE))
     return file_summaries
@@ -204,7 +293,11 @@ def _extract_facts(file_path, symbols, imports, index):
             facts.depends_on.append(imp.module)
             for pattern in EXTERNAL_SERVICE_PATTERNS:
                 if pattern in imp.module.lower():
-                    facts.external_services.append(imp.module)
+                    # Deduplicate by top-level service name (e.g. all boto3.* -> "boto3")
+                    top_level = pattern
+                    if top_level not in facts.external_services:
+                        facts.external_services.append(top_level)
+                    break
     for sym in symbols:
         ref_files = index.name_reference_map.get(sym.name, [])
         for rf in ref_files:
@@ -216,6 +309,19 @@ def _extract_facts(file_path, symbols, imports, index):
             if pattern in name_lower:
                 facts.side_effects.append(f"{sym.name} may {pattern}")
                 break
+    for sym in symbols:
+        for dec in getattr(sym, "decorators", []):
+            dec_lower = dec.lower().lstrip("@")
+            for pattern in ROUTE_DECORATOR_PATTERNS:
+                if dec_lower.startswith(pattern):
+                    facts.has_route_decorators = True
+                    route_path = _extract_route_path(dec)
+                    if route_path:
+                        facts.routes.append(route_path)
+                    else:
+                        facts.routes.append(f"[{sym.name}]")
+                    facts.decorators.append(dec)
+                    break
     if "test" in file_path.lower():
         facts.has_test_markers = True
         for imp in imports:
@@ -241,7 +347,7 @@ def _generate_file_summary(file_path, facts):
         path=file_path, purpose=purpose, responsibilities=responsibilities,
         main_symbols=main_symbols, depends_on=facts.depends_on[:5],
         used_by=facts.used_by[:5], side_effects=facts.side_effects[:5],
-        data_models_touched=facts.data_models[:5], external_services=facts.external_services[:3],
+        data_models_touched=facts.data_models[:5], external_services=facts.external_services[:8],
         confidence=confidence, generated_from=generated_from,
     )
 
@@ -253,7 +359,7 @@ def _generate_purpose(facts, file_path):
     if facts.has_route_decorators:
         parts.append(f"Defines {len(facts.routes)} API endpoints")
     if facts.main_classes:
-        parts.append(f"Implements {', '.join(facts.main_classes[:2])}")
+        parts.append(f"Implements {', '.join(facts.main_classes[:3])}")
     elif facts.main_functions:
         parts.append(f"Provides {', '.join(facts.main_functions[:3])}")
     if not parts:
@@ -315,3 +421,137 @@ def _save_cached_summaries(cache, path):
     data = {k: v.model_dump(mode="python") for k, v in cache.items()}
     packed = msgpack.packb(data, use_bin_type=True, default=str)
     Path(path).write_bytes(packed)
+
+
+# ---------------------------------------------------------------------------
+# LLM-enhanced summary generation
+# ---------------------------------------------------------------------------
+
+_LLM_SYSTEM_PROMPT = (
+    "You are a code analyst. For each Python file described below, write a concise "
+    "summary that explains the file's purpose and main responsibilities. Focus on "
+    "design intent and architectural role, not just listing symbols.\n\n"
+    "Respond with JSON only. The JSON must have a single key \"files\" whose value "
+    "is a list of objects, each with keys \"path\" (string), \"purpose\" (string, "
+    "1-2 sentences), and \"responsibilities\" (list of 2-5 short strings)."
+)
+
+
+def _get_openai_client():
+    """Lazily create an OpenAI client. Returns None if unavailable."""
+    try:
+        from openai import OpenAI
+        return OpenAI()
+    except Exception:
+        return None
+
+
+def _build_llm_prompt(batch: list[tuple[str, _FactBundle]]) -> str:
+    """Format a batch of files+facts into a compact user prompt."""
+    parts: list[str] = []
+    for i, (path, facts) in enumerate(batch, 1):
+        lines = [f"File {i}: {path}"]
+        if facts.main_classes:
+            lines.append(f"- Classes: {', '.join(facts.main_classes[:5])}")
+        if facts.main_functions:
+            lines.append(f"- Functions: {', '.join(facts.main_functions[:5])}")
+        deps = facts.depends_on[:5]
+        if deps:
+            lines.append(f"- Imports: {', '.join(deps)}")
+        if facts.docstrings:
+            doc = facts.docstrings[0][:150]
+            lines.append(f'- Docstring: "{doc}"')
+        if facts.has_test_markers:
+            lines.append("- This is a test file.")
+        if facts.has_route_decorators:
+            lines.append(f"- Defines {len(facts.routes)} HTTP route(s): {', '.join(facts.routes[:5])}")
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts)
+
+
+def _parse_llm_response(
+    raw_text: str,
+    paths: list[str],
+) -> dict[str, tuple[str, list[str]]]:
+    """Parse JSON from the LLM into {path: (purpose, responsibilities)}.
+
+    Returns only the paths that were successfully parsed.
+    """
+    result: dict[str, tuple[str, list[str]]] = {}
+    try:
+        data = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return result
+
+    files_list = data.get("files", [])
+    if not isinstance(files_list, list):
+        return result
+
+    for entry in files_list:
+        if not isinstance(entry, dict):
+            continue
+        p = entry.get("path", "")
+        purpose = entry.get("purpose", "")
+        resps = entry.get("responsibilities", [])
+        if p and purpose and isinstance(resps, list):
+            resps = [r for r in resps if isinstance(r, str)][:5]
+            result[p] = (str(purpose), resps)
+    return result
+
+
+def _generate_llm_summaries_batch(
+    batch: list[tuple[str, _FactBundle, list]],
+) -> dict[str, tuple[str, list[str]]]:
+    """Call the LLM for a batch of files and return enriched purpose/responsibilities.
+
+    Each item in *batch* is (file_path, facts, symbols).
+    Returns {path: (purpose, responsibilities)} for successfully enriched files.
+    On any failure, returns an empty dict (caller falls back to heuristic).
+    """
+    client = _get_openai_client()
+    if client is None:
+        return {}
+
+    prompt_batch = [(path, facts) for path, facts, _syms in batch]
+    user_prompt = _build_llm_prompt(prompt_batch)
+    paths = [path for path, _f, _s in batch]
+
+    try:
+        response = client.chat.completions.create(
+            model=SUMMARY_LLM_MODEL,
+            messages=[
+                {"role": "system", "content": _LLM_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.3,
+        )
+        raw = response.choices[0].message.content or ""
+        return _parse_llm_response(raw, paths)
+    except Exception as exc:
+        logger.debug("LLM summary batch failed: %s", exc)
+        return {}
+
+
+def _merge_llm_into_summary(
+    file_path: str,
+    facts: _FactBundle,
+    llm_result: tuple[str, list[str]],
+) -> FileSummary:
+    """Build a FileSummary using LLM-generated purpose/responsibilities
+    combined with heuristic structural fields."""
+    purpose, responsibilities = llm_result
+    main_symbols = facts.main_classes[:3] + facts.main_functions[:3]
+    return FileSummary(
+        path=file_path,
+        purpose=purpose,
+        responsibilities=responsibilities,
+        main_symbols=main_symbols,
+        depends_on=facts.depends_on[:5],
+        used_by=facts.used_by[:5],
+        side_effects=facts.side_effects[:5],
+        data_models_touched=facts.data_models[:5],
+        external_services=facts.external_services[:3],
+        confidence=0.9,
+        generated_from=["llm", "facts"],
+    )
