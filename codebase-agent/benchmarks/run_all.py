@@ -31,7 +31,7 @@ console = Console()
 
 RESULTS_DIR = Path(__file__).parent / "results"
 
-BENCHMARKS = ["repoqa", "sweqa", "dependeval"]
+BENCHMARKS = ["repoqa", "sweqa", "dependeval", "synthetic"]
 
 
 def _get_results_dir(timestamp: str | None = None) -> Path:
@@ -164,14 +164,53 @@ def _run_dependeval(config: AblationConfig, run_dir: Path, max_tasks: int | None
     return metrics
 
 
+def _run_synthetic(config: AblationConfig, run_dir: Path, max_tasks: int | None = None, challenges: list[str] | None = None, sizes: list[str] | None = None):
+    """Execute synthetic benchmark for a single config."""
+    from .synthetic.eval import run_synthetic_evaluation, compute_metrics
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        console=console,
+    ) as progress:
+        task_id = progress.add_task(
+            f"Synthetic [{config.name}]", total=max_tasks or 100
+        )
+
+        def on_progress(current, total, result):
+            progress.update(task_id, completed=current, total=total)
+
+        results = run_synthetic_evaluation(
+            config, max_tasks=max_tasks, challenges=challenges, sizes=sizes, progress_callback=on_progress
+        )
+
+    metrics = compute_metrics(results)
+    result_dicts = [r.to_dict() for r in results]
+    output_path = _save_results(result_dicts, "synthetic", config.name, run_dir)
+
+    metrics_path = run_dir / "synthetic" / f"{config.name}_metrics.json"
+    with open(metrics_path, "w") as f:
+        json.dump(metrics, f, indent=2)
+
+    console.print(f"  [green]Pass rate: {metrics['pass_rate']:.1%}[/green] "
+                  f"(avg score: {metrics['avg_score']:.2f}, "
+                  f"{metrics['passed']}/{metrics['total']})")
+    console.print(f"  Results: {output_path}")
+    return metrics
+
+
 @app.command()
 def run(
-    benchmark: Optional[str] = typer.Option(None, "--benchmark", "-b", help="Benchmark to run: repoqa, sweqa, dependeval"),
+    benchmark: Optional[str] = typer.Option(None, "--benchmark", "-b", help="Benchmark to run: repoqa, sweqa, dependeval, synthetic"),
     config: Optional[str] = typer.Option(None, "--config", "-c", help="Config ID to use"),
     all_configs: bool = typer.Option(False, "--all-configs", help="Run all ablation configs"),
     all_benchmarks: bool = typer.Option(False, "--all", help="Run all benchmarks with all configs"),
     max_tasks: Optional[int] = typer.Option(None, "--max-tasks", "-n", help="Limit number of tasks per benchmark"),
     repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names (SWE-QA only)"),
+    challenges: Optional[str] = typer.Option(None, "--challenges", help="Comma-separated challenge names (synthetic only)"),
+    sizes: Optional[str] = typer.Option(None, "--sizes", help="Comma-separated size tiers: XS,S,M,L,XL (synthetic only)"),
 ) -> None:
     """Run benchmark evaluations."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -199,6 +238,8 @@ def run(
             configs_to_run = [get_config(ConfigID.FULL_ADAPTIVE)]
 
     repo_list = repos.split(",") if repos else None
+    challenge_list = challenges.split(",") if challenges else None
+    size_list = sizes.split(",") if sizes else None
     all_metrics: dict[str, dict[str, dict]] = {}
 
     for bench in benchmarks_to_run:
@@ -216,6 +257,8 @@ def run(
                 metrics = _run_sweqa(cfg, run_dir, max_tasks, repo_list)
             elif bench == "dependeval":
                 metrics = _run_dependeval(cfg, run_dir, max_tasks)
+            elif bench == "synthetic":
+                metrics = _run_synthetic(cfg, run_dir, max_tasks, challenge_list, size_list)
             else:
                 continue
 
@@ -242,7 +285,7 @@ def _print_summary_table(all_metrics: dict[str, dict[str, dict]]):
     for name in config_names_sorted:
         table.add_column(name, justify="center")
 
-    for bench, bench_metrics in all_metrics.items():
+        for bench, bench_metrics in all_metrics.items():
         row = [bench.upper()]
         for cfg_name in config_names_sorted:
             m = bench_metrics.get(cfg_name, {})
@@ -252,6 +295,8 @@ def _print_summary_table(all_metrics: dict[str, dict[str, dict]]):
                 val = f"{m.get('avg_score', 0):.1f}"
             elif bench == "dependeval":
                 val = f"{m.get('exact_match_rate', 0):.1%}"
+            elif bench == "synthetic":
+                val = f"{m.get('pass_rate', 0):.1%}"
             else:
                 val = "-"
             row.append(val)

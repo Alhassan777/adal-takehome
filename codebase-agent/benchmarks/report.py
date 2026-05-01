@@ -97,6 +97,8 @@ def generate_markdown_report(run_dir: Path, all_metrics: dict[str, dict[str, dic
                 val = f" {m.get('avg_score', 0):.1f}/100 |"
             elif bench == "dependeval":
                 val = f" {m.get('exact_match_rate', 0):.1%} |"
+            elif bench == "synthetic":
+                val = f" {m.get('pass_rate', 0):.1%} (avg {m.get('avg_score', 0):.2f}) |"
             else:
                 val = " - |"
             row += val
@@ -223,6 +225,8 @@ def _display_table(all_metrics: dict[str, dict[str, dict]]):
                 row.append(f"{m.get('avg_score', 0):.1f}")
             elif bench == "dependeval":
                 row.append(f"{m.get('exact_match_rate', 0):.1%}")
+            elif bench == "synthetic":
+                row.append(f"{m.get('pass_rate', 0):.1%}")
             else:
                 row.append("-")
         table.add_row(*row)
