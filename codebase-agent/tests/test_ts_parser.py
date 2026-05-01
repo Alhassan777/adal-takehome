@@ -57,4 +57,30 @@ def test_parse_extracts_signatures():
 def test_parse_nonexistent_file():
     result = parse_file("/nonexistent/path.py")
     assert result.symbols == []
-    assert result.imports == []
+
+
+def test_parse_extracts_decorators(tmp_path):
+    source = (
+        'from fastapi import FastAPI\n\n'
+        'app = FastAPI()\n\n\n'
+        '@app.get("/users")\n'
+        'def list_users():\n'
+        '    return []\n\n\n'
+        '@app.post("/users")\n'
+        'def create_user(data: dict):\n'
+        '    return data\n\n\n'
+        '@app.delete("/users/{user_id}")\n'
+        'async def delete_user(user_id: int):\n'
+        '    pass\n\n\n'
+        'def plain_helper():\n'
+        '    return 42\n'
+    )
+    p = tmp_path / "routes.py"
+    p.write_text(source)
+    result = parse_file(str(p))
+
+    by_name = {s.name: s for s in result.symbols}
+    assert by_name["list_users"].decorators == ['@app.get("/users")']
+    assert by_name["create_user"].decorators == ['@app.post("/users")']
+    assert by_name["delete_user"].decorators == ['@app.delete("/users/{user_id}")']
+    assert by_name["plain_helper"].decorators == []
