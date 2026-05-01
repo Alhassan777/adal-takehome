@@ -144,7 +144,7 @@ def imports(
 @app.command()
 def ask(
     repo_path: str = typer.Argument(..., help="Path to the repository root"),
-    question: Optional[str] = typer.Option(None, "--question", "-q", help="Question (non-interactive mode)"),
+    question: str = typer.Argument(..., help="Question about the codebase (supports @file mentions)"),
     mode: str = typer.Option("adaptive", "--mode", "-m", help="Execution mode: adaptive or rlm"),
     sandbox: str = typer.Option("local", "--sandbox", help="Sandbox mode for RLM: local or docker"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
@@ -157,7 +157,7 @@ def ask(
     import os
     from ..config import ExecutionMode, SandboxMode
     from ..workflows.engine import create_engine
-    from .completer import interactive_prompt, parse_query
+    from .completer import parse_query
     from ..core.session import SessionConfig, get_or_init_session
     from ..logging.dev_logger import DevLogger
     from ..logging.user_logger import UserLogger
@@ -173,9 +173,6 @@ def ask(
     )
     session = get_or_init_session(repo_path, config=config)
 
-    if question is None:
-        question = interactive_prompt(session.index)
-
     user_logger = None
     if not quiet:
         verbosity = "verbose" if verbose else "normal"
@@ -186,7 +183,7 @@ def ask(
         os.environ["CODEBASE_AGENT_DEV_LOG"] = "1"
         dev_logger = DevLogger()
 
-    parsed = parse_query(question, session.index, session.root_path)
+    parsed = parse_query(question, session.mention_resolver)
 
     engine = create_engine(
         mode=execution_mode,
@@ -211,6 +208,101 @@ def ask(
             trace_path = dev_logger.export(wf_id, repo_path=repo_path)
             if trace_path:
                 console.print(f"[dim]Trace saved: {trace_path}[/dim]")
+
+
+@app.command()
+def chat(
+    repo_path: str = typer.Argument(..., help="Path to the repository root"),
+    mode: str = typer.Option("adaptive", "--mode", "-m", help="Execution mode: adaptive or rlm"),
+    sandbox: str = typer.Option("local", "--sandbox", help="Sandbox mode for RLM: local or docker"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+    quiet: bool = typer.Option(False, "--quiet", help="Quiet output (answer only)"),
+    dev_log: bool = typer.Option(False, "--dev-log", help="Enable developer logging"),
+    no_lsp: bool = typer.Option(False, "--no-lsp", help="Skip Pyright LSP"),
+    no_summaries: bool = typer.Option(False, "--no-summaries", help="Skip NL summaries"),
+) -> None:
+    """Interactive session: ask multiple questions in a long-lived REPL."""
+    import os
+    from prompt_toolkit import PromptSession
+    from ..config import ExecutionMode, SandboxMode
+    from ..workflows.engine import create_engine
+    from .completer import AtMentionCompleter, parse_query
+    from ..core.session import SessionConfig, get_or_init_session
+    from ..logging.dev_logger import DevLogger
+    from ..logging.user_logger import UserLogger
+
+    execution_mode = ExecutionMode(mode)
+    sandbox_mode = SandboxMode(sandbox)
+
+    config = SessionConfig(
+        use_lsp=not no_lsp,
+        use_summaries=not no_summaries,
+        watch=True,
+        execution_mode=execution_mode,
+        sandbox_mode=sandbox_mode,
+    )
+    session = get_or_init_session(repo_path, config=config)
+
+    completer = AtMentionCompleter(session.mention_resolver)
+    prompt_session: PromptSession = PromptSession(completer=completer)
+
+    console.print(f"[green]Session ready.[/green]")
+    console.print(f"  Files indexed:  {len(session.index.files)}")
+    console.print(f"  Symbols parsed: {len(session.index.symbols)}")
+    console.print("[dim]Type your questions. Use @filename for file mentions. /exit to quit.[/dim]\n")
+
+    while True:
+        try:
+            question = prompt_session.prompt("ask> ")
+        except (EOFError, KeyboardInterrupt):
+            break
+
+        stripped = question.strip()
+        if stripped.lower() in ("/exit", "/quit"):
+            break
+        if not stripped:
+            continue
+
+        user_logger = None
+        if not quiet:
+            verbosity = "verbose" if verbose else "normal"
+            user_logger = UserLogger(verbosity=verbosity, console=console)
+
+        dev_logger = None
+        if dev_log:
+            os.environ["CODEBASE_AGENT_DEV_LOG"] = "1"
+            dev_logger = DevLogger()
+
+        parsed = parse_query(question, session.mention_resolver)
+
+        engine = create_engine(
+            mode=execution_mode,
+            index=session.index,
+            root_path=session.root_path,
+            lsp=session.lsp,
+            sandbox=sandbox_mode,
+            dev_logger=dev_logger,
+            user_logger=user_logger,
+        )
+        result = engine.answer(parsed)
+
+        if not quiet:
+            wf = result.get("workflow_type", "unknown")
+            console.print(f"\n[dim]Mode: {wf}[/dim]")
+
+        console.print_json(data=result)
+
+        if dev_logger:
+            wf_id = dev_logger.workflow_tracer.last_workflow_id()
+            if wf_id:
+                trace_path = dev_logger.export(wf_id, repo_path=repo_path)
+                if trace_path:
+                    console.print(f"[dim]Trace saved: {trace_path}[/dim]")
+
+        console.print()
+
+    session.shutdown()
+    console.print("[dim]Session closed.[/dim]")
 
 
 @app.command()

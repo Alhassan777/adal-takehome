@@ -1,19 +1,22 @@
-"""@-mention file autocomplete and query parser for the interactive CLI."""
+"""@-mention file autocomplete and query parser for the CLI."""
 
 import re
-from pathlib import Path
 
-from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 
-from ..models import MentionedFile, ParsedQuery, RepoIndex
+from ..core.mentions import MentionResolver
+from ..models import ParsedQuery
 
 
 class AtMentionCompleter(Completer):
-    """Autocomplete file paths after @ trigger."""
+    """Autocomplete file paths after @ trigger.
 
-    def __init__(self, index: RepoIndex):
-        self.file_paths = sorted(f.path for f in index.files)
+    Holds a reference to MentionResolver so file_entries stay
+    in sync when the watcher refreshes the index.
+    """
+
+    def __init__(self, mention_resolver: MentionResolver):
+        self.mention_resolver = mention_resolver
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
@@ -24,43 +27,22 @@ class AtMentionCompleter(Completer):
         partial = text[at_pos + 1:]
         p = partial.lower()
 
-        for path in self.file_paths:
-            if p in path.lower() or p in Path(path).name.lower():
+        for path, path_lower, name_lower in self.mention_resolver.file_entries:
+            if p in path_lower or p in name_lower:
                 yield Completion(
                     path,
                     start_position=-len(partial),
                     display=path,
-                    display_meta=self._get_role(path),
                 )
 
-    def _get_role(self, path: str) -> str:
-        name = Path(path).name.lower()
-        parts = Path(path).parts
-        if "test" in name or "tests" in parts:
-            return "test"
-        if "model" in name:
-            return "model"
-        if "service" in name:
-            return "service"
-        if "util" in name or "helper" in name:
-            return "utility"
-        return ""
 
-
-def interactive_prompt(index: RepoIndex) -> str:
-    """Launch an interactive prompt with @-mention autocomplete."""
-    completer = AtMentionCompleter(index)
-    session: PromptSession = PromptSession(completer=completer)
-    return session.prompt("ask> ")
-
-
-def parse_query(raw: str, index: RepoIndex, root_path: str) -> ParsedQuery:
+def parse_query(raw: str, mention_resolver: MentionResolver) -> ParsedQuery:
     """Extract @file mentions, resolve to full paths, strip from query text."""
     mentions = re.findall(r"@([\w/.\-]+)", raw)
-    mentioned_files: list[MentionedFile] = []
+    mentioned_files = []
 
     for mention in mentions:
-        resolved = _resolve_mention(mention, index, root_path)
+        resolved = mention_resolver.resolve(mention)
         if resolved:
             mentioned_files.append(resolved)
 
@@ -72,30 +54,3 @@ def parse_query(raw: str, index: RepoIndex, root_path: str) -> ParsedQuery:
         clean_query=clean,
         mentioned_files=mentioned_files,
     )
-
-
-def _resolve_mention(mention: str, index: RepoIndex, root_path: str) -> MentionedFile | None:
-    for f in index.files:
-        if f.path == mention:
-            return _build_mentioned_file(f.path, index, root_path)
-    mention_name = Path(mention).name
-    for f in index.files:
-        if Path(f.path).name == mention_name:
-            return _build_mentioned_file(f.path, index, root_path)
-    m_lower = mention.lower()
-    for f in index.files:
-        if m_lower in f.path.lower():
-            return _build_mentioned_file(f.path, index, root_path)
-    return None
-
-
-def _build_mentioned_file(path: str, index: RepoIndex, root_path: str) -> MentionedFile:
-    abs_path = Path(root_path) / path
-    preview = ""
-    try:
-        lines = abs_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        preview = "\n".join(lines[:50])
-    except OSError:
-        pass
-    file_symbols = [s.name for s in index.symbols if s.file_path == path]
-    return MentionedFile(path=path, content_preview=preview, symbols=file_symbols)
