@@ -147,7 +147,8 @@ class DevLoggerBridge:
 
     def on_complete(self, answer: str) -> None:
         """Called when RLM finishes."""
-        pass
+        if self._dev and hasattr(self._dev, "on_rlm_complete"):
+            self._dev.on_rlm_complete(answer=answer[:2000], total_iterations=len(self._iterations))
 
     @property
     def iterations(self) -> list[dict]:

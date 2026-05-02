@@ -12,8 +12,11 @@ from ..config import MAX_ADAPTIVE_ROUNDS, OPENAI_MODEL
 from ..models import ParsedQuery, RepoIndex, UserSummary
 from ..logging.dev_logger import DevLogger
 from ..logging.user_logger import UserLogger
+from .classifier import ClassificationResult, classify_question
+from .playbooks import PLAYBOOKS, WorkflowPlaybook, get_playbook
 from .tool_schemas import build_openai_tool_schemas
 from .query_context import build_user_message
+from .tracing import DevLoggerAdapter, TracedRepoIndex, wrap_tools_with_tracing
 
 
 SYSTEM_PROMPT = """You are a codebase navigation agent. Your job is to answer questions about a Python repository by calling the provided tools.
@@ -25,6 +28,42 @@ Strategy:
 4. Use find_references, trace_module, or impact_analysis for relationship questions.
 
 Always ground your answer in specific file paths and line numbers. When you have enough information, provide a complete answer."""
+
+
+def _build_strategy_hint(
+    classification: ClassificationResult | None,
+    playbook: WorkflowPlaybook | None,
+) -> str:
+    """Format a playbook as a strategy-hint system message.
+
+    Returns an empty string when there is nothing useful to inject.
+    """
+    if classification is None or playbook is None:
+        return ""
+
+    lines = [
+        f"Workflow hint ({playbook.workflow_type.value}, "
+        f"confidence: {classification.confidence:.2f}):",
+        f"Suggested tools: {', '.join(playbook.required_tools)}",
+        "Strategy:",
+    ]
+    for i, step in enumerate(playbook.strategy_steps, 1):
+        lines.append(f"  {i}. {step}")
+
+    if playbook.failure_chains:
+        lines.append("Fallbacks:")
+        for trigger, action in playbook.failure_chains.items():
+            lines.append(f"  - {trigger} -> {action}")
+
+    if playbook.early_termination:
+        lines.append(f"Early stop: {playbook.early_termination}")
+
+    lines.append(
+        "\nThis is a suggested strategy. Deviate from it if the question "
+        "requires a different approach."
+    )
+
+    return "\n".join(lines)
 
 
 class AdaptiveEngine:
@@ -44,7 +83,10 @@ class AdaptiveEngine:
         self.lsp = lsp
         self.dev_logger = dev_logger
         self.user_logger = user_logger
-        self._tool_registry = self._build_tool_registry()
+        self._tracing_logger = DevLoggerAdapter(dev_logger)
+        self._traced_index = TracedRepoIndex(index, self._tracing_logger)
+        raw_registry = self._build_tool_registry(index_override=self._traced_index)
+        self._tool_registry = wrap_tools_with_tracing(raw_registry, self._tracing_logger)
         self._tool_schemas = build_openai_tool_schemas()
         self._client = OpenAI()
 
@@ -61,16 +103,28 @@ class AdaptiveEngine:
         if self.dev_logger:
             wf_id = self.dev_logger.on_workflow_start(question, "adaptive")
 
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ]
+        classification = classify_question(question)
+        playbook = get_playbook(classification.workflow) if classification else None
+        strategy_hint = _build_strategy_hint(classification, playbook) if playbook else ""
+        budget = playbook.max_tool_rounds if playbook else MAX_ADAPTIVE_ROUNDS
+
+        if self.dev_logger and classification:
+            self.dev_logger.on_workflow_start(
+                f"[classifier] {classification.workflow.value} "
+                f"(confidence={classification.confidence:.2f}, method={classification.method})",
+                "classification",
+            )
+
+        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        if strategy_hint:
+            messages.append({"role": "system", "content": strategy_hint})
+        messages.append({"role": "user", "content": user_message})
 
         tool_calls_made = []
         relevant_files: set[str] = {f.path for f in parsed_query.mentioned_files}
         relevant_symbols: set[str] = set()
 
-        for round_num in range(MAX_ADAPTIVE_ROUNDS):
+        for round_num in range(budget):
             response = self._client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=messages,
@@ -78,11 +132,20 @@ class AdaptiveEngine:
                 tool_choice="auto",
             )
 
+            if self.dev_logger and response.usage:
+                self.dev_logger.on_llm_usage(
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                    model=OPENAI_MODEL,
+                )
+
             choice = response.choices[0]
 
             if choice.finish_reason == "stop" or not choice.message.tool_calls:
                 final_text = choice.message.content or ""
                 break
+
+            messages.append(choice.message.model_dump())
 
             for tool_call in choice.message.tool_calls:
                 fn_name = tool_call.function.name
@@ -91,11 +154,10 @@ class AdaptiveEngine:
                 except json.JSONDecodeError:
                     fn_args = {}
 
-                result = self._execute_tool(fn_name, fn_args, round_num, tool_calls_made)
+                result = self._execute_tool(fn_name, fn_args, round_num, tool_calls_made, budget=budget)
 
                 self._extract_refs(result, relevant_files, relevant_symbols)
 
-                messages.append(choice.message.model_dump())
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -123,18 +185,13 @@ class AdaptiveEngine:
 
         return answer
 
-    def _execute_tool(self, name: str, args: dict, round_num: int, records: list) -> Any:
+    def _execute_tool(self, name: str, args: dict, round_num: int, records: list, *, budget: int = MAX_ADAPTIVE_ROUNDS) -> Any:
         """Execute a tool and record the call."""
         tool_fn = self._tool_registry.get(name)
         if not tool_fn:
             return {"error": f"Unknown tool: {name}"}
 
-        trace_id = ""
-        if self.dev_logger:
-            trace_id = self.dev_logger.on_tool_start(name, args)
-
         if self.user_logger:
-            budget = MAX_ADAPTIVE_ROUNDS
             self.user_logger.start_subtask(
                 round_num + 1, budget,
                 f"{name}({', '.join(f'{k}={v!r}' for k, v in list(args.items())[:2])})"
@@ -144,8 +201,6 @@ class AdaptiveEngine:
             result = tool_fn(**args)
             records.append({"tool": name, "args": args, "success": True})
 
-            if self.dev_logger and trace_id:
-                self.dev_logger.on_tool_end(trace_id, str(result)[:2000], True)
             if self.user_logger:
                 self.user_logger.subtask_result(self._preview(result))
 
@@ -153,8 +208,6 @@ class AdaptiveEngine:
         except Exception as e:
             records.append({"tool": name, "args": args, "success": False, "error": str(e)})
 
-            if self.dev_logger and trace_id:
-                self.dev_logger.on_tool_end(trace_id, "", False, error=str(e))
             if self.user_logger:
                 self.user_logger.subtask_result(f"[failed] {e}")
 
@@ -196,6 +249,13 @@ class AdaptiveEngine:
         files_list = sorted(relevant_files - {""})[:15]
         symbols_list = sorted(relevant_symbols - {""})[:15]
 
+        total_tokens = 0
+        est_cost = 0.0
+        if self.dev_logger:
+            tok_summary = self.dev_logger.token_tracker.workflow_summary()
+            total_tokens = tok_summary.total_tokens
+            est_cost = self.dev_logger.cost_estimator.estimate(tok_summary).total_cost_usd
+
         summary = UserSummary(
             question_type="adaptive",
             files_analyzed=len(files_list),
@@ -203,6 +263,8 @@ class AdaptiveEngine:
             tools_called=len(tool_calls_made),
             duration_seconds=duration,
             confidence="high" if files_list else "medium",
+            total_tokens=total_tokens,
+            est_cost_usd=est_cost,
         )
 
         return {
@@ -217,43 +279,8 @@ class AdaptiveEngine:
             "summary": summary.model_dump(),
         }
 
-    def _build_tool_registry(self) -> dict[str, Any]:
-        from ..intelligence.tools import (
-            find_references,
-            find_tests,
-            get_call_graph,
-            get_definition,
-            get_directory_summary,
-            get_file_summary,
-            get_imports,
-            impact_analysis,
-            list_tree,
-            read_snippet,
-            repo_map,
-            search_summaries,
-            search_symbols_tool,
-            search_text_tool,
-            trace_module,
-        )
+    def _build_tool_registry(self, index_override=None) -> dict[str, Any]:
+        from .engine import build_tool_registry as _build_shared_tool_registry
 
-        root = self.root_path
-        idx = self.index
-        lsp = self.lsp
-
-        return {
-            "search_symbols_tool": lambda query="", **kw: search_symbols_tool(idx, query),
-            "search_text_tool": lambda query="", file_glob="*.py", **kw: search_text_tool(root, query, file_glob),
-            "get_definition": lambda symbol_name="", context_file=None, **kw: get_definition(root, idx, symbol_name, context_file, lsp=lsp),
-            "find_references": lambda symbol_name="", **kw: find_references(root, idx, symbol_name, lsp=lsp),
-            "read_snippet": lambda file_path="", start_line=1, end_line=50, **kw: read_snippet(root, file_path, start_line, end_line),
-            "get_imports": lambda file_path="", **kw: get_imports(idx, file_path),
-            "trace_module": lambda file_path="", **kw: trace_module(root, idx, file_path),
-            "get_call_graph": lambda symbol_name="", **kw: get_call_graph(root, idx, symbol_name),
-            "find_tests": lambda file_or_symbol="", **kw: find_tests(idx, file_or_symbol),
-            "impact_analysis": lambda symbol_name="", **kw: impact_analysis(root, idx, symbol_name),
-            "get_file_summary": lambda file_path="", **kw: get_file_summary(idx, root, file_path),
-            "search_summaries": lambda query="", **kw: search_summaries(idx, root, query),
-            "get_directory_summary": lambda dir_path="", **kw: get_directory_summary(idx, root, dir_path),
-            "list_tree": lambda **kw: list_tree(root, idx),
-            "repo_map": lambda depth=2, **kw: repo_map(root, idx, depth=depth),
-        }
+        idx = index_override if index_override is not None else self.index
+        return _build_shared_tool_registry(idx, self.root_path, lsp=self.lsp)

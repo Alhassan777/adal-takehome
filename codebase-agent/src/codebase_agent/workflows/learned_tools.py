@@ -18,11 +18,15 @@ Lifecycle:
 from __future__ import annotations
 
 import json
+import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 from ..config import MAX_LEARNED_TOOLS, OPENAI_SUB_MODEL
+
+_VALID_TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
 CRITIC_SYSTEM_PROMPT = """You are a code quality critic. Evaluate a proposed reusable tool function on these criteria:
@@ -65,9 +69,16 @@ class LearnedToolRegistry:
             self._manifest = []
 
     def _save_manifest(self) -> None:
-        """Persist manifest to disk."""
+        """Persist manifest to disk atomically (write + rename)."""
         self.tools_dir.mkdir(parents=True, exist_ok=True)
-        self.manifest_path.write_text(json.dumps(self._manifest, indent=2))
+        fd, tmp = tempfile.mkstemp(dir=str(self.tools_dir), suffix=".tmp")
+        try:
+            with open(fd, "w") as f:
+                json.dump(self._manifest, f, indent=2)
+            Path(tmp).replace(self.manifest_path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
 
     def propose_tool(
         self,
@@ -87,6 +98,12 @@ class LearnedToolRegistry:
         Returns:
             {"approved": bool, "feedback": str}
         """
+        if not _VALID_TOOL_NAME_RE.match(name):
+            return {
+                "approved": False,
+                "feedback": f"Invalid tool name '{name}'. Must be lowercase snake_case (a-z, 0-9, _), 1-64 chars, starting with a letter.",
+            }
+
         existing_names = {t["name"] for t in self._manifest}
         if name in existing_names:
             return {"approved": False, "feedback": f"Tool '{name}' already exists. Use a different name."}
@@ -181,7 +198,9 @@ Evaluate on correctness, generalizability, non-redundancy, and safety."""
         """Save approved tool to disk and update manifest."""
         self.tools_dir.mkdir(parents=True, exist_ok=True)
 
-        tool_file = self.tools_dir / f"{name}.py"
+        tool_file = (self.tools_dir / f"{name}.py").resolve()
+        if not str(tool_file).startswith(str(self.tools_dir.resolve())):
+            raise ValueError(f"Tool file path escapes tools_dir: {tool_file}")
         tool_file.write_text(code)
 
         entry = {
@@ -208,18 +227,25 @@ Evaluate on correctness, generalizability, non-redundancy, and safety."""
         to_evict = sorted_tools[: len(self._manifest) - MAX_LEARNED_TOOLS]
 
         for entry in to_evict:
-            tool_file = self.tools_dir / entry["file"]
-            if tool_file.exists():
+            tool_file = self._safe_tool_path(entry["file"])
+            if tool_file is not None and tool_file.exists():
                 tool_file.unlink()
             self._manifest.remove(entry)
+
+    def _safe_tool_path(self, filename: str) -> Path | None:
+        """Resolve a tool filename and verify it stays inside tools_dir."""
+        tool_file = (self.tools_dir / filename).resolve()
+        if not str(tool_file).startswith(str(self.tools_dir.resolve())):
+            return None
+        return tool_file
 
     def get_active_tools(self, index_hash: str) -> dict[str, Any]:
         """Return validated tools as callables. Supports compositionality."""
         active: dict[str, Any] = {}
 
         for entry in self._manifest:
-            tool_file = self.tools_dir / entry["file"]
-            if not tool_file.exists():
+            tool_file = self._safe_tool_path(entry["file"])
+            if tool_file is None or not tool_file.exists():
                 continue
 
             code = tool_file.read_text()

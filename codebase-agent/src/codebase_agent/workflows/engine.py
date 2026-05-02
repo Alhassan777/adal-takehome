@@ -68,6 +68,7 @@ def build_tool_registry(index: RepoIndex, root_path: str, lsp=None) -> dict[str,
     """
     from ..intelligence.tools import (
         find_references,
+        find_routes,
         find_tests,
         get_call_graph,
         get_definition,
@@ -100,4 +101,5 @@ def build_tool_registry(index: RepoIndex, root_path: str, lsp=None) -> dict[str,
         "get_directory_summary": lambda dir_path="", **kw: get_directory_summary(index, root_path, dir_path),
         "list_tree": lambda **kw: list_tree(root_path, index),
         "repo_map": lambda depth=2, **kw: repo_map(root_path, index, depth=depth),
+        "find_routes": lambda dir_path="", **kw: find_routes(root_path, index, dir_path),
     }
