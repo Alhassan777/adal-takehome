@@ -16,11 +16,12 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "get_call_graph": "Get the outgoing call graph for a function/method (what it calls).",
     "find_tests": "Find test files that cover a given file or symbol.",
     "impact_analysis": "Analyze the impact of changing a symbol: references, dependents, tests, and risk level.",
-    "get_file_summary": "Get the NL summary for a file (purpose, responsibilities, side effects, dependencies).",
+    "get_file_summary": "Get the NL summary for a file (purpose, responsibilities, side effects, dependencies, external services, and detected route endpoints).",
     "search_summaries": "Keyword search across file summaries to find files relevant to a topic.",
     "get_directory_summary": "Get a summary of a directory (role, contents, common dependencies).",
     "list_tree": "Get a compact directory tree listing of the repository.",
     "repo_map": "Get a hierarchical annotated repository map with roles and key symbols per directory.",
+    "find_routes": "Scan the codebase for HTTP route decorators (e.g. @app.get, @router.post) and return all endpoints with file paths and line numbers.",
 }
 
 TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
@@ -128,6 +129,13 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         "type": "object",
         "properties": {
             "depth": {"type": "integer", "description": "Max directory depth for the map", "default": 2},
+        },
+        "required": [],
+    },
+    "find_routes": {
+        "type": "object",
+        "properties": {
+            "dir_path": {"type": "string", "description": "Optional directory to restrict search (default: entire repo)", "default": ""},
         },
         "required": [],
     },
