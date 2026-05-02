@@ -241,10 +241,77 @@ Traces stored as JSON in `.cache/traces/`.
 
 ## Running Tests
 
+### Install test dependencies
+
 ```bash
-pip install -r requirements.txt pytest
-pytest tests/ -v
+pip install -e ".[dev]"
 ```
+
+### Run
+
+```bash
+pytest tests/ -v                    # all tests
+pytest tests/test_engine_modes.py -v           # single module
+pytest tests/ -k "adaptive" -v                 # by keyword
+pytest tests/ --cov=codebase_agent --cov-report=term-missing  # with coverage
+```
+
+No live API keys or Pyright installation required -- all external calls (OpenAI, LSP) are mocked.
+
+### Test Suite (17 files)
+
+**Core Indexing & Parsing**
+
+| File | Covers |
+| ---- | ------ |
+| `test_scanner.py` | File discovery, metadata collection, ignore-dir filtering |
+| `test_ts_parser.py` | tree-sitter symbol/import/decorator/signature extraction |
+| `test_indexer.py` | Index build, msgpack save/load roundtrip, incremental reindex, cache invalidation, watcher update |
+
+**Intelligence & Tools**
+
+| File | Covers |
+| ---- | ------ |
+| `test_summarizer.py` | Heuristic summaries, LLM summary path (mocked), fallbacks, route decorator detection |
+| `test_tools.py` | All 15 agent tools: `search_symbols`, `get_definition`, `find_references`, `read_snippet`, `get_call_graph`, `impact_analysis`, `trace_module`, etc. |
+
+**Workflow Engine**
+
+| File | Covers |
+| ---- | ------ |
+| `test_workflows.py` | Classifier (all 23 workflow types across 6 tiers), playbook registry, learned tool name validation |
+| `test_engine_modes.py` | `create_engine` factory, tool registry (all 15 tools), AdaptiveEngine answer/tool-call/budget-exhaustion/error branches, RLM REPL execution/sub-calls/namespace |
+
+**Learned Tools**
+
+| File | Covers |
+| ---- | ------ |
+| `test_tool_reflector.py` | `ToolReflector.reflect()`, proposal parsing, conversation summarization |
+| `test_tool_suggestion_flow.py` | Full approval flow: `UserLogger` suggestion UI, CLI `_present_tool_suggestions`, RLM `_reflect_on_tools` |
+| `test_learned_tools.py` | `LearnedToolRegistry`: validation, observer-critic, propose/approve/reject lifecycle, LRU eviction, usage telemetry |
+
+**CLI & REPL**
+
+| File | Covers |
+| ---- | ------ |
+| `test_cli_completer.py` | `parse_query` @-mention extraction (full name, partial, multiple) |
+| `test_chat_repl.py` | `AtMentionCompleter` live reference, `MentionResolver.refresh()`, symbol updates |
+
+**Logging & Tracing**
+
+| File | Covers |
+| ---- | ------ |
+| `test_user_logging.py` | `UserLogger` quiet/normal/verbose modes, summary panel |
+| `test_dev_logging.py` | `TokenTracker`, `ToolTracer`, `WorkflowTracer` span tree, `CostEstimator` |
+| `test_tracing.py` | `TracedRepoIndex`, `DevLoggerAdapter`, `wrap_tools_with_tracing`, `DevLoggerBridge` |
+| `test_tool_schemas.py` | OpenAI function-calling schema generation, completeness checks |
+
+### Notes
+
+- Tests use `examples/sample_repo` as a fixture repo (models.py, services.py, utils.py)
+- `test_workflows.py::TestAgentLoopEngine` is skipped (legacy engine removed; see `test_engine_modes.py`)
+- No `conftest.py` -- fixtures are defined locally in each test file
+- Set `CODEBASE_AGENT_DEV_LOG=1` to exercise the dev-logger enabled path in `test_dev_logging.py`
 
 ## Limitations
 

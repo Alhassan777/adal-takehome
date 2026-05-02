@@ -52,7 +52,7 @@ class SyntheticResult:
             "scoring_method": self.scoring_method,
             "score": round(self.score, 4),
             "passed": self.passed,
-            "answer": self.run_result.answer[:500] if self.run_result.answer else "",
+            "answer": str(self.run_result.answer)[:500] if self.run_result.answer else "",
             "duration_s": self.run_result.duration_s,
             "config_id": self.run_result.config_id,
             "success": self.run_result.success,
