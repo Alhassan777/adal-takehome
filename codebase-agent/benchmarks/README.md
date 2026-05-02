@@ -1,141 +1,247 @@
-# Benchmark Evaluation Harness
+# Benchmarks
 
-Automated evaluation of the codebase navigation agent against four benchmarks, with a 5-configuration ablation matrix.
+This directory contains the full evaluation harness for the codebase navigation agent. It runs the agent across four benchmark suites under five ablation configurations and writes structured results to `results/`.
 
-## Benchmarks
+---
 
-| Benchmark | What it tests | Tasks | Metric |
-|-----------|---------------|-------|--------|
-| **RepoQA** | Function localization via natural-language description | 100 (Python) | Pass rate (BLEU > 0.8) |
-| **SWE-QA** | Repository-level code question answering | 720 (15 repos) | Avg score /100 (LLM judge) |
-| **DependEval** | Dependency ordering recognition | Variable (Python subset) | Exact Match Rate |
-| **Synthetic** | All agent capabilities via hand-crafted repos with known answers | 50 repos, ~280 questions | Pass rate + avg score |
+## Directory Layout
 
-## Ablation Matrix
+```
+benchmarks/
+├── README.md               ← this file
+├── __init__.py
+├── __main__.py             ← enables `python -m benchmarks.run_all`
+├── run_all.py              ← CLI entry point (Typer app)
+├── configs.py              ← ablation matrix (5 configs)
+├── runner.py               ← core agent invocation wrapper
+├── repoqa_eval.py          ← RepoQA adapter
+├── sweqa_eval.py           ← SWE-QA adapter
+├── dependeval_eval.py      ← DependEval adapter
+├── synthetic/              ← self-contained synthetic benchmark suite
+│   └── README.md           ← synthetic-specific docs
+├── vendor/                 ← external datasets cloned on first run
+│   ├── repoqa_data/
+│   ├── repoqa_repos/
+│   ├── SWE-QA-Bench/
+│   └── DependEval/
+└── results/                ← created at runtime
+    └── YYYY-MM-DD_HH-MM-SS/
+        ├── summary.json
+        ├── repoqa/{config_id}.jsonl + {config_id}_metrics.json
+        ├── sweqa/{config_id}.jsonl  + {config_id}_metrics.json
+        ├── dependeval/{config_id}.jsonl + {config_id}_metrics.json
+        └── synthetic/{config_id}.jsonl + {config_id}_metrics.json
+```
 
-| Config | Mode | LSP | Summaries | Tests |
-|--------|------|-----|-----------|-------|
-| `full_adaptive` | adaptive | on | on | Best-case |
-| `full_rlm` | rlm | on | on | Mode comparison |
-| `no_lsp` | adaptive | off | on | LSP contribution |
-| `no_summaries` | adaptive | on | off | Summaries contribution |
-| `minimal` | adaptive | off | off | Baseline |
+---
 
 ## Quick Start
 
 ```bash
-# Install benchmark dependencies
-pip install -r benchmarks/requirements.txt
+# Single benchmark, default config (full_adaptive)
+python -m benchmarks.run_all --benchmark synthetic
 
-# Run RepoQA with default config (full_adaptive), limit to 5 tasks
-python -m benchmarks.run_all run --benchmark repoqa --config full_adaptive --max-tasks 5
+# Single benchmark, specific config
+python -m benchmarks.run_all --benchmark repoqa --config full_rlm
 
-# Run all configs on RepoQA
-python -m benchmarks.run_all run --benchmark repoqa --all-configs
+# Single benchmark, all 5 ablation configs
+python -m benchmarks.run_all --benchmark dependeval --all-configs
 
-# Run SWE-QA on small repos only
-python -m benchmarks.run_all run --benchmark sweqa --repos flask,requests,pytest
+# All 4 benchmarks × all 5 configs (full ablation matrix)
+python -m benchmarks.run_all --all
 
-# Run synthetic with specific challenges and sizes
-python -m benchmarks.run_all run --benchmark synthetic --challenges basic_nav,name_collision --sizes XS,S --max-tasks 10
+# Smoke test — 10 tasks only
+python -m benchmarks.run_all --benchmark synthetic --max-tasks 10
 
-# Run synthetic on all challenges at XS size (fast smoke test)
-python -m benchmarks.run_all run --benchmark synthetic --sizes XS
+# Synthetic: narrow to specific challenges and size tiers
+python -m benchmarks.run_all --benchmark synthetic \
+    --challenges basic_nav,dependency \
+    --sizes XS,S
 
-# Run everything
-python -m benchmarks.run_all run --all
-
-# Generate report from latest results
-python -m benchmarks.report generate --latest
+# SWE-QA: narrow to specific repos
+python -m benchmarks.run_all --benchmark sweqa --repos flask,requests
 ```
 
-## Output Structure
+Every run creates a timestamped directory under `results/` and writes a `summary.json` with a table of all metrics.
+
+---
+
+## Ablation Configs (`configs.py`)
+
+The ablation matrix tests how much each component of the agent contributes to performance by selectively disabling features.
+
+| Config ID | Mode | LSP | Summaries | Purpose |
+|---|---|---|---|---|
+| `full_adaptive` | ADAPTIVE | ✓ | ✓ | Best-case adaptive — all features on (default) |
+| `full_rlm` | RLM | ✓ | ✓ | Best-case retrieval-augmented loop — all features on |
+| `no_lsp` | ADAPTIVE | ✗ | ✓ | Adaptive without Pyright LSP — measures LSP contribution |
+| `no_summaries` | ADAPTIVE | ✓ | ✗ | Adaptive without NL summaries — measures summary contribution |
+| `minimal` | ADAPTIVE | ✗ | ✗ | Baseline — tree-sitter + ripgrep only |
+
+`AblationConfig` is a frozen dataclass; `ALL_CONFIGS` is a list of all five for looping. `get_config("full_adaptive")` retrieves by string or `ConfigID` enum.
+
+---
+
+## Core Runner (`runner.py`)
+
+A thin wrapper that every benchmark adapter uses. It handles session initialization, engine creation, timing, and error capture so each adapter only needs to supply `(repo_path, question, config)`.
+
+### `RunResult`
+
+Returned by every agent invocation:
+
+| Field | Type | Description |
+|---|---|---|
+| `question` | str | The question asked |
+| `answer` | str | Agent's full response text |
+| `config_id` | str | Which ablation config was used |
+| `repo_path` | str | Path to the repo that was indexed |
+| `duration_s` | float | Wall-clock time in seconds |
+| `success` | bool | `False` if the agent raised an exception |
+| `tool_calls` | list[dict] | Tool calls the engine made |
+| `error` | str \| None | Exception message + traceback if `success=False` |
+
+### Key Functions
+
+**`init_session_for_config(repo_path, config)`** — creates or retrieves a cached `Session` for a given `(repo, config)` pair. Calling this separately before a batch avoids re-indexing the same repo for every question.
+
+**`run_agent(repo_path, question, config, session?)`** — runs the agent on a single question. Accepts an optional pre-initialized session to skip re-init overhead. Always returns a `RunResult`, never raises.
+
+**`run_batch(repo_path, questions, config, progress_callback?)`** — initializes the session once, then calls `run_agent` for each question in the list. Preferred over calling `run_agent` in a loop when all questions target the same repo.
+
+---
+
+## Benchmark Adapters
+
+### `repoqa_eval.py` — RepoQA
+
+**What it tests:** Given only a natural-language description of a function, can the agent navigate a real GitHub repository and return the correct source code?
+
+**Task format:** "Find the function described below and return its exact source code."
+
+**Dataset:** [evalplus/repoqa](https://github.com/evalplus/repoqa) — Python subset. Loaded via the `repoqa` pip package, HuggingFace `datasets`, or a local JSONL cache at `vendor/repoqa_data/python.jsonl`. Repositories are shallow-cloned into `vendor/repoqa_repos/` on first use.
+
+**Scoring:** BLEU-4 between the agent's extracted code block and the ground-truth function body. A task **passes** at BLEU ≥ 0.8. `extract_code_block()` extracts the first fenced code block from the agent's response; falls back to heuristic `def`-line extraction.
+
+**Key metrics output:**
+
+| Metric | Description |
+|---|---|
+| `pass_rate` | Fraction of tasks with BLEU ≥ 0.8 |
+| `avg_bleu_score` | Mean BLEU-4 across all tasks |
+| `avg_duration_s` | Mean per-task agent latency |
+| `errors` | Tasks where the agent failed entirely |
+
+---
+
+### `sweqa_eval.py` — SWE-QA
+
+**What it tests:** Broad repository-level comprehension — architecture questions, API usage, feature explanations — across 15 popular Python projects (720 QA pairs total, ~48 questions per repo).
+
+**Task format:** "I have a code repository at {path}. Please answer the following question about this repository."
+
+**Dataset:** [SWE-QA-Bench](https://github.com/peng-weihan/SWE-QA-Bench) — cloned into `vendor/SWE-QA-Bench/` on first use. Questions are loaded from `Experiment/datasets/questions/{repo}.jsonl`. Target repos are cloned at their pinned commits into `vendor/SWE-QA-Bench/datas/repos/`. Default repos: `flask`, `requests`, `pytest`.
+
+**Scoring:** LLM-as-Judge across 5 dimensions (20 pts each, 100-pt total). The judge script writes scores to `results/sweqa_scoring/{config_id}/`. If the judge script is unavailable, a built-in heuristic scorer activates (keyword overlap + file reference detection + answer length).
+
+**Scoring dimensions:**
+
+| Dimension | Max | What it measures |
+|---|---|---|
+| `correctness` | 20 | Factual accuracy of the answer |
+| `completeness` | 20 | Covers all relevant aspects |
+| `relevance` | 20 | Stays on topic, grounded in the code |
+| `clarity` | 20 | Clear and well-structured explanation |
+| `reasoning` | 20 | Shows reasoning process |
+
+**Key metrics output:**
+
+| Metric | Description |
+|---|---|
+| `avg_score` | Mean total score out of 100 |
+| `avg_{dimension}` | Mean score per dimension |
+| `scored` | Number of tasks that received scores |
+| `errors` | Agent failures |
+
+---
+
+### `dependeval_eval.py` — DependEval
+
+**What it tests:** Strict dependency ordering — given a small Python project, output the files in topological order (leaf dependencies first, dependents last) as a JSON array.
+
+**Task format:** "Output ONLY a JSON array of filenames in dependency order." The agent must produce a parseable `["utils.py", "models.py", "services.py", "main.py"]` style response.
+
+**Dataset:** [DependEval](https://github.com/ink7-sudo/DependEval) Task 1 (Dependency Recognition), Python subset. Cloned into `vendor/DependEval/`. Supports multiple directory layouts the dataset may use; falls back to full directory scan if the expected paths differ between dataset versions.
+
+**Evaluation flow:** Each task's files are written to a temp directory, indexed by the agent, and deleted afterward. `parse_predicted_order()` extracts the JSON array from the agent response.
+
+**Scoring:** Exact match only — the predicted file ordering must be identical to the ground-truth list (after normalizing to basenames). Partial matches (correct set, wrong order) are counted separately in the metrics but do not count as passes.
+
+**Key metrics output:**
+
+| Metric | Description |
+|---|---|
+| `exact_match_rate` | Fraction of tasks with a perfectly correct ordering |
+| `matched` | Count of exact matches |
+| `partial_matches` | Correct file set but wrong order |
+| `errors` | Agent failures |
+| `avg_duration_s` | Mean per-task latency |
+
+---
+
+### `synthetic/` — Synthetic Suite
+
+**What it tests:** 11 controlled challenge categories (basic navigation, import chains, inheritance, dead code, cross-cutting concerns, etc.) across 5 size tiers (XS → XL). Every question has a machine-verifiable ground-truth answer — no LLM judge required.
+
+**Dataset:** Fully generated in code. No external data or cloning needed.
+
+See [`synthetic/README.md`](synthetic/README.md) for the full description of all 11 challenges, their repo structures, and every question they ask.
+
+**Key metrics output:**
+
+| Metric | Description |
+|---|---|
+| `pass_rate` | Fraction of questions with score ≥ 0.5 |
+| `avg_score` | Mean score across all questions (0.0–1.0) |
+| `by_challenge` | Per-challenge pass rate and avg score |
+| `by_scoring_method` | Per-scoring-method breakdown |
+| `errors` | Agent failures |
+
+---
+
+## Results Structure
+
+Each run writes to `results/YYYY-MM-DD_HH-MM-SS/`:
 
 ```
-benchmarks/results/{timestamp}/
-  repoqa/
-    full_adaptive.jsonl
-    full_adaptive_metrics.json
-    ...
-  sweqa/
-    ...
-  dependeval/
-    ...
-  synthetic/
-    full_adaptive.jsonl
-    full_adaptive_metrics.json
-    ...
-  summary.json
-  report.md
+results/
+└── 2026-05-01_17-30-00/
+    ├── summary.json                        ← all metrics in one file
+    ├── repoqa/
+    │   ├── full_adaptive.jsonl             ← one JSON line per task
+    │   ├── full_adaptive_metrics.json
+    │   ├── full_rlm.jsonl
+    │   └── full_rlm_metrics.json
+    ├── sweqa/
+    │   └── ...
+    ├── dependeval/
+    │   └── ...
+    └── synthetic/
+        └── ...
 ```
 
-## Synthetic Benchmark
+Each `.jsonl` file contains one result per line. The `summary.json` is a nested dict: `{benchmark: {config_id: metrics}}`, which is also printed as a Rich table at the end of every run.
 
-The synthetic benchmark generates Python repos from scratch with known-correct answers for every question. No external datasets or network access required.
-
-### Challenge Types (10)
-
-| Challenge | What it tests | Agent workflows exercised |
-|-----------|---------------|---------------------------|
-| `basic_nav` | Symbol lookup, file listing, text search | SYMBOL_LOOKUP, FILE_LISTING, TEXT_SEARCH |
-| `import_chains` | Re-exports, aliases, relative/circular imports | IMPORT_TRACING, GOTO_DEFINITION_HINT |
-| `deep_hierarchy` | Navigation through deeply nested packages | MODULE_OVERVIEW, ARCHITECTURE_MAP |
-| `name_collision` | Disambiguation when same name appears in N files | GOTO_DEFINITION (all variants) |
-| `inheritance` | Class hierarchies, MRO, method overrides | CALL_GRAPH, FEATURE_EXPLANATION |
-| `dependency` | Linear chains, diamonds, fan-out hubs | DEPENDENCY_GRAPH, IMPACT_ANALYSIS, BREAKING_CHANGE |
-| `test_mapping` | Co-located tests, separate tree, missing coverage | TEST_DISCOVERY, MISSING_TESTS |
-| `dead_code` | Unused symbols, transitively dead code | DEAD_CODE, SAFE_REFACTORING |
-| `cross_cutting` | Decorators, plugin registries, dynamic dispatch | FEATURE_EXPLANATION, CALL_GRAPH |
-| `api_surface` | `__all__`, underscore conventions, re-exports | API_SURFACE, MODULE_OVERVIEW |
-
-### Size Tiers (5)
-
-| Tier | Files | Lines | Purpose |
-|------|-------|-------|---------|
-| XS | 3-15 | 50-200 | Sanity / smoke test |
-| S | 10-20 | 200-500 | Small project baseline |
-| M | 24-35 | 700-2000 | Realistic project |
-| L | 37-90 | 1700-6600 | Stress test |
-| XL | 62-210 | 2700-14000 | Scaling limit test |
-
-### CLI Options
-
-```bash
---benchmark synthetic      # Select synthetic benchmark
---challenges basic_nav,... # Comma-separated subset (default: all 10)
---sizes XS,S,...           # Comma-separated subset (default: all 5)
---max-tasks N              # Cap total questions evaluated
-```
-
-### Scoring Methods
-
-Each question uses one of these automated scorers:
-
-- **file_and_symbol_match**: Correct file path + symbol name in answer
-- **file_set_match**: F1 recall over expected file set
-- **ordered_list_match**: Files appear in correct dependency order
-- **symbol_set_match**: Correct set of symbols mentioned
-- **risk_level_match**: Correct risk assessment (high/medium/low)
-- **contains_keywords**: Required keywords present in explanation
-- **boolean_match**: Correct yes/no or count answer
+---
 
 ## Adding a New Benchmark
 
-1. Create `benchmarks/{name}_eval.py` with:
-   - `run_{name}_evaluation(config, max_tasks, progress_callback) -> list[Result]`
-   - `compute_metrics(results) -> dict`
-2. Add the benchmark name to `BENCHMARKS` in `run_all.py`
-3. Add a `_run_{name}()` dispatcher in `run_all.py`
+1. Create `your_eval.py` in this directory.
+2. Define `YourTask`, `YourResult` dataclasses with a `to_dict()` method.
+3. Implement `run_your_evaluation(config, *, max_tasks?, progress_callback?) -> list[YourResult]`.
+4. Implement `compute_metrics(results) -> dict`.
+5. Add `"your_bench"` to `BENCHMARKS` in `run_all.py`.
+6. Add a `_run_your_bench(config, run_dir, max_tasks)` private function following the pattern of the existing four.
+7. Wire it into the `run()` command's dispatch block.
 
-## Cost Estimation
-
-| Benchmark | Tasks | Tokens/task (est.) | Full matrix cost (GPT-4o) |
-|-----------|-------|-------------------|--------------------------|
-| RepoQA | 100 | ~50K | ~$25 |
-| SWE-QA (3 repos) | 144 | ~100K | ~$72 |
-| SWE-QA (all) | 720 | ~100K | ~$360 |
-| DependEval | ~200 | ~20K | ~$20 |
-| Synthetic (XS only) | ~55 | ~15K | ~$4 |
-| Synthetic (all sizes) | ~280 | ~30K | ~$42 |
-
-Use `--max-tasks N` for budget-constrained runs. Use `OPENAI_MODEL=gpt-4o-mini` for cheaper iterations.
+The adapter calls `run_agent()` from `runner.py` and produces `RunResult` objects — that's the only coupling to the core agent.

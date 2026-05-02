@@ -85,6 +85,30 @@ Track which tools get used, for which question types, and how often.
 
 **Justification**: This provides a lightweight reinforcement signal without needing a formal reward model. Tools that are never used get evicted (LRU). Tools used frequently for specific question types can be prioritized in future retrievals. It's the minimum viable "memory" the system needs to improve over time.
 
+### 8. Playbook-guided prompt injection
+
+**Problem**: The adaptive engine's system prompt is generic — every question type (trivial lookup to cross-cutting impact analysis) starts with the same four-line strategy. The LLM must re-derive the right approach from scratch on every call, wasting tokens on strategy discovery that the system already knows.
+
+**Solution**: Before the main tool-calling loop, a single `OPENAI_SUB_MODEL` (default `gpt-4o-mini`) call classifies the user question into one of 23 `WorkflowType` values. The matching playbook's `required_tools`, `strategy_steps`, `failure_chains`, `early_termination`, and `max_tool_rounds` are injected as a second system message.
+
+```
+User question
+  → classify_question()       # one gpt-4o-mini call → WorkflowType
+  → get_playbook()            # look up strategy, tools, budget
+  → inject hint               # second system message before user message
+  → AdaptiveEngine loop       # LLM starts with a targeted plan
+```
+
+**Why LLM classification, not regex**: The original heuristic classifier (`classifier.py`) used regex patterns and keyword scoring. It failed on ambiguous phrasing: *"how safe is it to change the User model"* scored `feature_explanation` because "how" had the highest keyword weight, when the correct type is `impact_analysis`. A small model call handles natural language variation correctly. The cost is ~200-300 tokens per query on `gpt-4o-mini` (~$0.00004), negligible relative to the main loop cost ($0.01-0.05).
+
+**Why no heuristic fallback**: If the classification call fails (network error, missing API key, malformed response), `classify_question()` returns `None`. The caller skips injection entirely and runs the full `MAX_ADAPTIVE_ROUNDS = 15` loop with the generic prompt. This is identical to the system's behavior before this change — no degradation, no crash.
+
+**Per-workflow budget**: `playbook.max_tool_rounds` replaces the flat 15-round cap when a playbook is available. A `file_reading` question uses 2 rounds; a `feature_explanation` uses 8. This reduces cost on simple queries and gives complex ones their full budget. When no classification is available, the original 15-round cap applies.
+
+**The hint is a suggestion, not a constraint**: The injected system message ends with *"This is a suggested strategy. Deviate from it if the question requires a different approach."* The LLM can and should ignore the hint if the actual question doesn't fit the classified workflow.
+
+**Implementation scope**: Two files changed — `classifier.py` (rewritten from regex/keyword to LLM) and `adaptive_engine.py` (classification + playbook injection wired into `answer()`). `playbooks.py` is unchanged; its `trigger_description` fields are read by the classifier prompt and its `strategy_steps`/`failure_chains` are formatted into the hint.
+
 ## What We Deferred (and Why It's Overkill Now)
 
 | Deferred Item | What It Is | Why We Skipped It | When to Revisit |
@@ -95,7 +119,7 @@ Track which tools get used, for which question types, and how often.
 | Full AutoAgents multi-observer pattern | Three separate observer roles (Agent Observer, Plan Observer, Action Observer) evaluating different aspects | One observer (tool quality critic) covers our validation needs. The agent's "plan" is implicit in its code, and "action" results are verified by test cases. | When learned tools start having multi-step execution plans that need plan-level review, or when the system is deployed multi-tenant with stricter quality requirements. |
 | ColBERT embeddings for skill indexing | Late-interaction embedding model for semantic skill search (used by code-voyager) | Requires hosting a ColBERT model, building an index, and maintaining it. Overkill for <50 tools where keyword matching on descriptions suffices. | When shared skill libraries span multiple codebases and users, requiring cross-domain retrieval. |
 | Custom REPL sandbox (built from scratch) | Our own restricted `exec()` environment with custom builtins | The `rlms` library already provides a tested sandbox implementation with configurable isolation (local, Docker, Modal, E2B). No reason to rebuild. | Never, unless the `rlms` library is abandoned or has fundamental limitations we can't work around. |
-| Deterministic playbook mode | The original hardcoded `_exec_*` workflow executors | Both modes are LLM-driven. Playbooks were too rigid for novel questions and required maintaining 24 separate executor functions. | Never. This is a permanent architectural decision. The playbook definitions remain as reference material for system prompts. |
+| Deterministic playbook mode | The original hardcoded `_exec_*` workflow executors | Both modes are LLM-driven. Playbooks were too rigid for novel questions and required maintaining 24 separate executor functions. The playbook *definitions* are now active — the LLM classifier routes questions and their strategy/tools/budget are injected into the adaptive engine's prompt (see §8 above). But execution remains LLM-driven, not deterministic. | Never. This is a permanent architectural decision. |
 
 ## Three-Tier NL Summarization System
 
@@ -454,6 +478,28 @@ No changes to `models.py`, `tools.py`, `engine.py`, `adaptive_engine.py`, `rlm_e
 **What we adopted**: Confirmation that per-codebase skill storage, session-persistent memory, and SKILL.md metadata files are viable patterns.
 
 **What we deferred**: ColBERT-based skill retrieval, Claude Code hook integration (we use CLI + OpenAI).
+
+## Benchmark Reliability
+
+### Scoring
+
+`score_boolean_match()` in the synthetic benchmark suite originally required specific keyword hits (e.g. `"dead"`, `"unused"`, `"no test"`). Semantically correct agent answers that used different phrasing (e.g. `"no references outside this file"`, `"no specific test files"`) were scored as failures.
+
+We expanded the phrase lists for each boolean category (`is_dead`, `has_tests`, `safe_to_delete`) with equivalents observed in actual agent outputs. The scorer now also reports which phrase matched (`matched_phrase` key in details) so false-positive inflation is auditable. The `file_count` scorer was extended to count enumerated `.py` filenames when the agent returns a list rather than a bare number.
+
+All expansions are exact substring matches against the normalized (lowercased) answer -- no fuzzy matching, no embeddings, no LLM-as-a-judge. This preserves fully deterministic, reproducible scoring.
+
+### Route Detection Tool
+
+A new `find_routes` tool scans the codebase for HTTP decorator patterns such as `@app.get(...)`, `@router.post(...)`, `@blueprint.route(...)`, and Django-style `path(...)` calls. It is registered in `build_tool_registry()` and exposed via both the OpenAI function-calling schema (adaptive engine) and the `tools.*` namespace (RLM engine).
+
+The tool is framework-agnostic: the pattern set covers FastAPI, Flask, and Django without hardcoding synthetic-repo-specific decorator names. It accepts an optional `dir_path` to restrict the scan.
+
+### Configurable Benchmark Verbosity
+
+The always-on `DevLogger` + `UserLogger(verbosity="verbose")` that was added during initial debugging has been replaced with a `--verbose / -v` CLI flag on `benchmarks.run_all`. When omitted (the default), no `DevLogger` or `UserLogger` is instantiated, keeping output clean for routine runs. The `raw_llm_output` preview in the RLM engine's iteration loop is additionally gated behind `dev_logger` being present, so it only appears in verbose mode.
+
+The `verbose` flag propagates from the CLI through `run_all.py` → each `_run_*` helper → the benchmark-specific `run_*_evaluation()` → `evaluate_*()` → `run_agent()`.
 
 ## Tradeoffs Summary
 
