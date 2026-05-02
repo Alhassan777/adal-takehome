@@ -17,12 +17,12 @@ logger = logging.getLogger("codebase_agent.dev")
 class DevLogger:
     """Single entry point wiring together all tracing subsystems."""
 
-    def __init__(self) -> None:
+    def __init__(self, model: str | None = None) -> None:
         self.token_tracker = TokenTracker()
         self.tool_tracer = ToolTracer()
         self.workflow_tracer = WorkflowTracer()
         self.index_profiler = IndexProfiler()
-        self.cost_estimator = CostEstimator()
+        self.cost_estimator = CostEstimator(model=model)
 
     def is_enabled(self) -> bool:
         return os.environ.get("CODEBASE_AGENT_DEV_LOG", "0") == "1"
@@ -51,6 +51,7 @@ class DevLogger:
     def on_workflow_start(self, question: str, workflow_type: str) -> str:
         if not self.is_enabled():
             return ""
+        self.token_tracker.start_workflow()
         wf_id = self.workflow_tracer.start_workflow(question, workflow_type)
         logger.debug(f"[WORKFLOW START] type={workflow_type} question={question[:100]}")
         return wf_id
@@ -67,6 +68,15 @@ class DevLogger:
             return
         self.workflow_tracer.end_subtask(subtask_id, finding)
         logger.debug(f"[SUBTASK END] {subtask_id}")
+
+    def on_llm_usage(self, prompt_tokens: int, completion_tokens: int, model: str = "") -> None:
+        """Record actual token usage from an LLM API response."""
+        if not self.is_enabled():
+            return
+        self.token_tracker.record_llm_usage(prompt_tokens, completion_tokens, model)
+        logger.debug(
+            f"[LLM USAGE] model={model} prompt={prompt_tokens} completion={completion_tokens}"
+        )
 
     def on_workflow_end(self, workflow_id: str, answer: dict) -> None:
         if not self.is_enabled():
@@ -85,6 +95,23 @@ class DevLogger:
         logger.debug(
             f"[INDEX] {profile.file_count} files, {profile.symbol_count} symbols "
             f"in {profile.total_duration_ms:.0f}ms (cache_hit={profile.cache_hit})"
+        )
+
+    def on_rlm_step(self, code: str, output: str, sub_calls: list | None = None) -> None:
+        """Record an RLM REPL iteration (called by DevLoggerBridge)."""
+        if not self.is_enabled():
+            return
+        sub_count = len(sub_calls) if sub_calls else 0
+        logger.debug(
+            f"[RLM STEP] code={len(code)} chars, output={len(output)} chars, sub_calls={sub_count}"
+        )
+
+    def on_rlm_complete(self, answer: str, total_iterations: int) -> None:
+        """Record RLM completion metadata (called by DevLoggerBridge)."""
+        if not self.is_enabled():
+            return
+        logger.debug(
+            f"[RLM COMPLETE] iterations={total_iterations}, answer_chars={len(answer)}"
         )
 
     def on_error(self, exc: Exception, context: str) -> None:
