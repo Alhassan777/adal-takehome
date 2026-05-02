@@ -51,6 +51,7 @@ User question
             -> read_snippet          # exact code spans at line precision
             -> trace_module          # dependency chains
             -> impact_analysis       # change-risk surface
+            -> [MCP remote tools]    # OAuth-authenticated external services (optional)
   -> ToolReflector (RLM only)        # proposes learned tools for reuse
   -> Answer with file paths and line numbers
 ```
@@ -142,6 +143,7 @@ codebase-agent --help
 - `--verbose / -v` (ask, chat): Show per-tool result previews
 - `--quiet` (ask, chat): Only show the final JSON answer (suppresses progress)
 - `--dev-log` (ask, chat): Enable developer logging and save trace to `.cache/traces/`
+- `--mcp transport:url` (ask, chat): Connect to a remote MCP server via OAuth 2.1 (repeatable)
 - `--last / --session` (trace): View the last trace or all session traces
 
 ## @-Mention File References
@@ -153,6 +155,34 @@ codebase-agent ask /path/to/repo "How does @services.py call @models.py?"
 ```
 
 Mentioned files are resolved and injected as context into the agent's workflow.
+
+## MCP Integration (Remote Tool Servers)
+
+Connect to external MCP servers (like Notion, Hugging Face, etc.) so the agent can use their tools alongside the built-in codebase tools. Authentication uses OAuth 2.1 with PKCE -- the agent discovers the OAuth metadata, performs dynamic client registration, and walks you through the browser-based authorization flow.
+
+### CLI Usage
+
+```bash
+# Single MCP server
+codebase-agent ask /path/to/repo "List my Notion documents" \
+    --mcp http:https://mcp.notion.com/mcp
+
+# Multiple MCP servers
+codebase-agent chat /path/to/repo \
+    --mcp http:https://mcp.notion.com/mcp \
+    --mcp http:https://huggingface.co/mcp
+
+# Via environment variable (comma-separated)
+export MCP_SERVERS=http:https://mcp.notion.com/mcp,http:https://huggingface.co/mcp
+codebase-agent chat /path/to/repo
+```
+
+### Supported Transports
+
+- `http` -- Streamable HTTP (recommended, newer)
+- `sse` -- Server-Sent Events (legacy)
+
+Remote MCP tools are merged into the same tool registry as the built-in codebase tools, so the LLM can freely combine local code navigation with remote service queries in a single answer.
 
 ## Summary System
 
@@ -233,6 +263,7 @@ Traces stored as JSON in `.cache/traces/`.
 - pydantic, typer, rich, networkx
 - tree-sitter, tree-sitter-python
 - msgpack, watchfiles, prompt_toolkit
+- httpx (MCP OAuth + transport)
 
 **System (installed in Docker):**
 

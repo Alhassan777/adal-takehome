@@ -103,6 +103,7 @@ class RLMEngine:
         sandbox: SandboxMode = SandboxMode.LOCAL,
         dev_logger: DevLogger | None = None,
         user_logger: UserLogger | None = None,
+        mcp_sessions: list | None = None,
     ):
         self.index = index
         self.root_path = root_path
@@ -123,6 +124,9 @@ class RLMEngine:
         self._tool_registry = wrap_tools_with_tracing(raw_registry, self._tracing_logger)
         self._index_hash = self._compute_index_hash()
         self._pending_sub_calls: list[dict[str, Any]] = []
+
+        if mcp_sessions:
+            self._merge_mcp_tools(mcp_sessions)
 
     def answer(self, parsed_query: ParsedQuery) -> dict:
         """Main entry point: run the RLM REPL loop."""
@@ -420,6 +424,13 @@ class RLMEngine:
 
         idx = index_override if index_override is not None else self.index
         return _build_shared_tool_registry(idx, self.root_path, lsp=self.lsp)
+
+    def _merge_mcp_tools(self, mcp_sessions: list) -> None:
+        """Merge tools from remote MCP sessions into the local registry."""
+        from ..mcp.registry import mcp_tool_registry
+
+        for session in mcp_sessions:
+            self._tool_registry.update(mcp_tool_registry(session))
 
 
 class _ToolNamespace:

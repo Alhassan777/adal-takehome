@@ -501,6 +501,55 @@ The always-on `DevLogger` + `UserLogger(verbosity="verbose")` that was added dur
 
 The `verbose` flag propagates from the CLI through `run_all.py` → each `_run_*` helper → the benchmark-specific `run_*_evaluation()` → `evaluate_*()` → `run_agent()`.
 
+## MCP Integration (Remote Tool Servers)
+
+### Problem
+
+The agent's tools are all local — they operate on the indexed codebase via tree-sitter, LSP, and ripgrep. There is no mechanism to incorporate tools from external services (documentation platforms, issue trackers, model registries, etc.) that live behind APIs.
+
+### Solution: OAuth-Authenticated MCP Client
+
+We add a `codebase_agent.mcp` package that connects to remote [MCP](https://modelcontextprotocol.io/) servers, authenticates via OAuth 2.1, and merges their tools into the same tool registry used by both engines.
+
+**Architecture**:
+
+```
+codebase_agent/mcp/
+├── oauth.py       # OAuth 2.1 discovery + PKCE + token exchange
+├── transport.py   # Streamable HTTP and SSE JSON-RPC transports
+├── session.py     # High-level session: connect, list tools, call tools
+└── registry.py    # Bridge MCP tool schemas → OpenAI function-calling format
+```
+
+**OAuth 2.1 flow** (per MCP spec):
+1. Send bare `initialize` to the MCP server, expect 401.
+2. Parse `WWW-Authenticate` for `resource_metadata` URL (RFC 9728).
+3. Fetch resource metadata → extract `authorization_servers[0]`.
+4. Fetch `{auth_server}/.well-known/oauth-authorization-server` for OAuth metadata.
+5. Dynamic Client Registration (RFC 7591) at `registration_endpoint`.
+6. PKCE `S256` authorization code flow with interactive browser redirect.
+7. Token exchange → `Bearer` header on all subsequent MCP requests.
+
+**Integration points**:
+- `AdaptiveEngine.__init__`: merges MCP tools into `_tool_registry` and `_tool_schemas`.
+- `RLMEngine.__init__`: merges MCP tools into `_tool_registry` (available as `tools.*` in REPL).
+- `create_engine()`: accepts `mcp_sessions` kwarg, passes to both engines.
+- CLI `ask` / `chat`: `--mcp transport:url` flag (repeatable) for connecting at startup.
+
+**Design decisions**:
+- MCP tools are indistinguishable from local tools after registration. The LLM does not know which tools are local vs remote — it just uses the best one for the question.
+- OAuth tokens are ephemeral (one CLI session). No persistent token storage.
+- `httpx` was chosen over `requests` for its HTTP/2 support and streaming capabilities needed by SSE transport.
+
+### What We Deferred
+
+| Deferred | Reason |
+|---|---|
+| Token refresh | Access tokens from the OAuth flow are short-lived but typically last longer than a CLI session. Refresh logic adds complexity for minimal benefit in the current interactive use case. |
+| MCP server mode | Exposing the agent's own tools as an MCP server (so other clients can use them) is architecturally separate from being an MCP client and doubles the surface area. |
+| Persistent token storage | Storing tokens across sessions requires secure storage (keychain, encrypted file). Interactive OAuth is acceptable for CLI usage. |
+| Non-OAuth MCP servers | Some MCP servers use API keys or no auth. Supporting these would require a different connection path, deferring until a concrete use case arises. |
+
 ## Tradeoffs Summary
 
 | Decision | Benefit | Cost |

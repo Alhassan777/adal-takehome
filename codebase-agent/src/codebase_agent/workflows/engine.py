@@ -24,6 +24,7 @@ def create_engine(
     sandbox: SandboxMode = SandboxMode.LOCAL,
     dev_logger: DevLogger | None = None,
     user_logger: UserLogger | None = None,
+    mcp_sessions: list | None = None,
     **kwargs,
 ):
     """Factory: create the appropriate engine based on execution mode.
@@ -36,6 +37,7 @@ def create_engine(
         sandbox: Sandbox isolation level (only used by RLM mode)
         dev_logger: Developer trace logger
         user_logger: User-facing progress logger
+        mcp_sessions: Optional list of connected MCPSession instances
     """
     if mode == ExecutionMode.ADAPTIVE:
         from .adaptive_engine import AdaptiveEngine
@@ -46,6 +48,7 @@ def create_engine(
             lsp=lsp,
             dev_logger=dev_logger,
             user_logger=user_logger,
+            mcp_sessions=mcp_sessions,
         )
     elif mode == ExecutionMode.RLM:
         from .rlm_engine import RLMEngine
@@ -57,6 +60,7 @@ def create_engine(
             sandbox=sandbox,
             dev_logger=dev_logger,
             user_logger=user_logger,
+            mcp_sessions=mcp_sessions,
         )
     raise ValueError(f"Unknown execution mode: {mode}")
 

@@ -203,6 +203,38 @@ def imports(
     console.print_json(data=result)
 
 
+def _connect_mcp_servers(
+    mcp_specs: list[str] | None,
+) -> list:
+    """Parse ``--mcp`` arguments and return connected MCPSession instances.
+
+    Each *mcp_spec* has the form ``transport:url``, e.g.
+    ``http:https://mcp.notion.com/mcp``.
+    """
+    if not mcp_specs:
+        return []
+
+    from ..mcp.session import MCPSession
+
+    sessions = []
+    for spec in mcp_specs:
+        if ":" not in spec:
+            console.print(f"[yellow]Invalid --mcp format (expected transport:url): {spec}[/yellow]")
+            continue
+        transport, url = spec.split(":", 1)
+        if transport not in ("http", "sse"):
+            console.print(f"[yellow]Unknown MCP transport '{transport}', expected http or sse[/yellow]")
+            continue
+        try:
+            sess = MCPSession.connect(transport, url)
+            n = len(sess.list_tools())
+            console.print(f"[green]MCP connected:[/green] {url} ({n} tool(s))")
+            sessions.append(sess)
+        except Exception as exc:
+            console.print(f"[red]MCP connection failed for {url}: {exc}[/red]")
+    return sessions
+
+
 @app.command()
 def ask(
     repo_path: str = typer.Argument(..., help="Path to the repository root"),
@@ -214,6 +246,7 @@ def ask(
     dev_log: bool = typer.Option(False, "--dev-log", help="Enable developer logging"),
     no_lsp: bool = typer.Option(False, "--no-lsp", help="Skip Pyright LSP"),
     no_summaries: bool = typer.Option(False, "--no-summaries", help="Skip NL summaries"),
+    mcp: Optional[list[str]] = typer.Option(None, "--mcp", help="Connect to MCP server (transport:url, e.g. http:https://mcp.notion.com/mcp)"),
 ) -> None:
     """Ask a question about the codebase (auto-inits session if needed)."""
     import os
@@ -226,6 +259,8 @@ def ask(
 
     execution_mode = ExecutionMode(mode)
     sandbox_mode = SandboxMode(sandbox)
+
+    mcp_sessions = _connect_mcp_servers(mcp)
 
     dev_logger = None
     if dev_log:
@@ -259,6 +294,7 @@ def ask(
         sandbox=sandbox_mode,
         dev_logger=dev_logger,
         user_logger=user_logger,
+        mcp_sessions=mcp_sessions or None,
     )
     result = engine.answer(parsed)
 
@@ -289,6 +325,7 @@ def chat(
     dev_log: bool = typer.Option(False, "--dev-log", help="Enable developer logging"),
     no_lsp: bool = typer.Option(False, "--no-lsp", help="Skip Pyright LSP"),
     no_summaries: bool = typer.Option(False, "--no-summaries", help="Skip NL summaries"),
+    mcp: Optional[list[str]] = typer.Option(None, "--mcp", help="Connect to MCP server (transport:url, e.g. http:https://mcp.notion.com/mcp)"),
 ) -> None:
     """Interactive session: ask multiple questions in a long-lived REPL."""
     import os
@@ -302,6 +339,8 @@ def chat(
 
     execution_mode = ExecutionMode(mode)
     sandbox_mode = SandboxMode(sandbox)
+
+    mcp_sessions = _connect_mcp_servers(mcp)
 
     session_dev_logger = None
     if dev_log:
@@ -327,6 +366,9 @@ def chat(
     console.print(f"[green]Session ready.[/green]")
     console.print(f"  Files indexed:  {len(session.index.files)}")
     console.print(f"  Symbols parsed: {len(session.index.symbols)}")
+    if mcp_sessions:
+        total_mcp_tools = sum(len(s.list_tools()) for s in mcp_sessions)
+        console.print(f"  MCP servers:    {len(mcp_sessions)} ({total_mcp_tools} remote tool(s))")
     console.print("[dim]Type your questions. Use @filename for file mentions. /exit to quit.[/dim]\n")
 
     while True:
@@ -356,6 +398,7 @@ def chat(
             sandbox=sandbox_mode,
             dev_logger=session_dev_logger,
             user_logger=user_logger,
+            mcp_sessions=mcp_sessions or None,
         )
         result = engine.answer(parsed)
 

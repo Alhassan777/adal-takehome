@@ -123,6 +123,15 @@ SUPPORTED_EXTENSIONS: set[str] = {
     ".pyi",
 }
 
+MCP_SERVERS: list[dict[str, str]] = []
+_mcp_raw = os.environ.get("MCP_SERVERS", "")
+if _mcp_raw:
+    for entry in _mcp_raw.split(","):
+        entry = entry.strip()
+        if ":" in entry:
+            transport, url = entry.split(":", 1)
+            MCP_SERVERS.append({"transport": transport, "url": url})
+
 INDEX_DIR = ".cache"
 INDEX_FILE = "codebase_index.msgpack"
 HASH_FILE = "file_hashes.msgpack"
