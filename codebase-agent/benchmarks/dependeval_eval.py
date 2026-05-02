@@ -290,12 +290,14 @@ def parse_predicted_order(answer: str) -> list[str]:
 def evaluate_task(
     task: DependEvalTask,
     config: AblationConfig,
+    *,
+    verbose: bool = False,
 ) -> DependEvalResult:
     """Evaluate a single DependEval DR task."""
     temp_repo = create_temp_repo(task)
 
     try:
-        run_result = run_agent(str(temp_repo), DEPENDEVAL_PROMPT, config)
+        run_result = run_agent(str(temp_repo), DEPENDEVAL_PROMPT, config, verbose=verbose)
         predicted = parse_predicted_order(run_result.answer) if run_result.success else []
 
         predicted_normalized = [Path(f).name for f in predicted]
@@ -319,6 +321,7 @@ def run_dependeval_evaluation(
     language: str = "python",
     max_tasks: int | None = None,
     progress_callback=None,
+    verbose: bool = False,
 ) -> list[DependEvalResult]:
     """Run the full DependEval DR evaluation for a given config."""
     if not setup_dependeval():
@@ -336,7 +339,7 @@ def run_dependeval_evaluation(
     results = []
     for i, task in enumerate(tasks):
         logger.info(f"[{i+1}/{len(tasks)}] Task {task.task_id} ({len(task.files)} files)")
-        result = evaluate_task(task, config)
+        result = evaluate_task(task, config, verbose=verbose)
         results.append(result)
 
         if progress_callback:

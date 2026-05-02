@@ -56,7 +56,7 @@ def _save_results(results: list[dict], benchmark: str, config_id: str, run_dir: 
     return output_path
 
 
-def _run_repoqa(config: AblationConfig, run_dir: Path, max_tasks: int | None = None):
+def _run_repoqa(config: AblationConfig, run_dir: Path, max_tasks: int | None = None, *, verbose: bool = False):
     """Execute RepoQA benchmark for a single config."""
     from .repoqa_eval import run_repoqa_evaluation, compute_metrics
 
@@ -75,7 +75,7 @@ def _run_repoqa(config: AblationConfig, run_dir: Path, max_tasks: int | None = N
             progress.update(task_id, completed=current, total=total)
 
         results = run_repoqa_evaluation(
-            config, max_tasks=max_tasks, progress_callback=on_progress
+            config, max_tasks=max_tasks, progress_callback=on_progress, verbose=verbose
         )
 
     metrics = compute_metrics(results)
@@ -92,7 +92,7 @@ def _run_repoqa(config: AblationConfig, run_dir: Path, max_tasks: int | None = N
     return metrics
 
 
-def _run_sweqa(config: AblationConfig, run_dir: Path, max_tasks: int | None = None, repos: list[str] | None = None):
+def _run_sweqa(config: AblationConfig, run_dir: Path, max_tasks: int | None = None, repos: list[str] | None = None, *, verbose: bool = False):
     """Execute SWE-QA benchmark for a single config."""
     from .sweqa_eval import run_sweqa_evaluation, compute_metrics
 
@@ -111,7 +111,7 @@ def _run_sweqa(config: AblationConfig, run_dir: Path, max_tasks: int | None = No
             progress.update(task_id, completed=current, total=total)
 
         results = run_sweqa_evaluation(
-            config, max_tasks=max_tasks, repos=repos, progress_callback=on_progress
+            config, max_tasks=max_tasks, repos=repos, progress_callback=on_progress, verbose=verbose
         )
 
     metrics = compute_metrics(results)
@@ -128,7 +128,7 @@ def _run_sweqa(config: AblationConfig, run_dir: Path, max_tasks: int | None = No
     return metrics
 
 
-def _run_dependeval(config: AblationConfig, run_dir: Path, max_tasks: int | None = None):
+def _run_dependeval(config: AblationConfig, run_dir: Path, max_tasks: int | None = None, *, verbose: bool = False):
     """Execute DependEval Task 1 benchmark for a single config."""
     from .dependeval_eval import run_dependeval_evaluation, compute_metrics
 
@@ -147,7 +147,7 @@ def _run_dependeval(config: AblationConfig, run_dir: Path, max_tasks: int | None
             progress.update(task_id, completed=current, total=total)
 
         results = run_dependeval_evaluation(
-            config, max_tasks=max_tasks, progress_callback=on_progress
+            config, max_tasks=max_tasks, progress_callback=on_progress, verbose=verbose
         )
 
     metrics = compute_metrics(results)
@@ -164,7 +164,7 @@ def _run_dependeval(config: AblationConfig, run_dir: Path, max_tasks: int | None
     return metrics
 
 
-def _run_synthetic(config: AblationConfig, run_dir: Path, max_tasks: int | None = None, challenges: list[str] | None = None, sizes: list[str] | None = None):
+def _run_synthetic(config: AblationConfig, run_dir: Path, max_tasks: int | None = None, challenges: list[str] | None = None, sizes: list[str] | None = None, *, verbose: bool = False):
     """Execute synthetic benchmark for a single config."""
     from .synthetic.eval import run_synthetic_evaluation, compute_metrics
 
@@ -183,7 +183,7 @@ def _run_synthetic(config: AblationConfig, run_dir: Path, max_tasks: int | None 
             progress.update(task_id, completed=current, total=total)
 
         results = run_synthetic_evaluation(
-            config, max_tasks=max_tasks, challenges=challenges, sizes=sizes, progress_callback=on_progress
+            config, max_tasks=max_tasks, challenges=challenges, sizes=sizes, progress_callback=on_progress, verbose=verbose
         )
 
     metrics = compute_metrics(results)
@@ -211,6 +211,7 @@ def run(
     repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names (SWE-QA only)"),
     challenges: Optional[str] = typer.Option(None, "--challenges", help="Comma-separated challenge names (synthetic only)"),
     sizes: Optional[str] = typer.Option(None, "--sizes", help="Comma-separated size tiers: XS,S,M,L,XL (synthetic only)"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable detailed DevLogger/UserLogger tracing for each agent run"),
 ) -> None:
     """Run benchmark evaluations."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -252,13 +253,13 @@ def run(
             console.print(f"\n[bold]Config: {cfg.name}[/bold] ({cfg.description})")
 
             if bench == "repoqa":
-                metrics = _run_repoqa(cfg, run_dir, max_tasks)
+                metrics = _run_repoqa(cfg, run_dir, max_tasks, verbose=verbose)
             elif bench == "sweqa":
-                metrics = _run_sweqa(cfg, run_dir, max_tasks, repo_list)
+                metrics = _run_sweqa(cfg, run_dir, max_tasks, repo_list, verbose=verbose)
             elif bench == "dependeval":
-                metrics = _run_dependeval(cfg, run_dir, max_tasks)
+                metrics = _run_dependeval(cfg, run_dir, max_tasks, verbose=verbose)
             elif bench == "synthetic":
-                metrics = _run_synthetic(cfg, run_dir, max_tasks, challenge_list, size_list)
+                metrics = _run_synthetic(cfg, run_dir, max_tasks, challenge_list, size_list, verbose=verbose)
             else:
                 continue
 
@@ -285,7 +286,7 @@ def _print_summary_table(all_metrics: dict[str, dict[str, dict]]):
     for name in config_names_sorted:
         table.add_column(name, justify="center")
 
-        for bench, bench_metrics in all_metrics.items():
+    for bench, bench_metrics in all_metrics.items():
         row = [bench.upper()]
         for cfg_name in config_names_sorted:
             m = bench_metrics.get(cfg_name, {})

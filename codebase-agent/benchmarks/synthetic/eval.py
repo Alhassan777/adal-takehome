@@ -66,6 +66,8 @@ class SyntheticResult:
 # ---------------------------------------------------------------
 
 def _normalize(text: str) -> str:
+    if not isinstance(text, str):
+        text = str(text)
     return text.lower().strip().replace("\\", "/")
 
 
@@ -176,38 +178,81 @@ def score_contains_keywords(answer: str, expected: dict) -> tuple[float, dict]:
 
 def score_boolean_match(answer: str, expected: dict) -> tuple[float, dict]:
     """Flexible check for boolean/count/existence questions."""
+    if not isinstance(answer, str):
+        answer = str(answer)
     ans = _normalize(answer)
 
     if "is_dead" in expected:
         target = expected["is_dead"]
         if target:
-            match = any(w in ans for w in ["dead", "unused", "not used", "never imported", "not imported"])
+            match = any(w in ans for w in [
+                "dead", "unused", "not used", "never imported", "not imported",
+                "no references outside", "not actively used", "not referenced",
+                "no other files", "not used elsewhere", "only referenced within",
+                "may not be used", "might not be", "never referenced",
+                "no references to", "is not actively",
+            ])
         else:
-            match = any(w in ans for w in ["used", "referenced", "imported", "alive", "active"])
-        return 1.0 if match else 0.0, {"expected_dead": target, "match": match}
+            match = any(w in ans for w in [
+                "used", "referenced", "imported", "alive", "active",
+                "is used", "is referenced", "is imported",
+            ])
+        matched_phrase = next((w for w in (
+            ["dead", "unused", "not used", "never imported", "not imported",
+             "no references outside", "not actively used", "not referenced",
+             "no other files", "not used elsewhere", "only referenced within",
+             "may not be used", "might not be", "never referenced",
+             "no references to", "is not actively"] if target else
+            ["used", "referenced", "imported", "alive", "active",
+             "is used", "is referenced", "is imported"]
+        ) if w in ans), None)
+        return 1.0 if match else 0.0, {"expected_dead": target, "match": match, "matched_phrase": matched_phrase}
 
     if "has_tests" in expected:
         target = expected["has_tests"]
         if target:
             match = any(w in ans for w in ["test", "tested", "coverage"])
         else:
-            match = any(w in ans for w in ["no test", "untested", "not tested", "no coverage", "missing"])
-        return 1.0 if match else 0.0, {"expected_has_tests": target, "match": match}
+            match = any(w in ans for w in [
+                "no test", "untested", "not tested", "no coverage", "missing",
+                "no specific test", "are no test", "does not have test",
+                "doesn't have test", "no dedicated test", "not covered",
+                "no matching test",
+            ])
+        matched_phrase = next((w for w in (
+            ["test", "tested", "coverage"] if target else
+            ["no test", "untested", "not tested", "no coverage", "missing",
+             "no specific test", "are no test", "does not have test",
+             "doesn't have test", "no dedicated test", "not covered",
+             "no matching test"]
+        ) if w in ans), None)
+        return 1.0 if match else 0.0, {"expected_has_tests": target, "match": match, "matched_phrase": matched_phrase}
 
     if "safe_to_delete" in expected:
         target = expected["safe_to_delete"]
         if target:
-            match = any(w in ans for w in ["safe", "can delete", "unused", "no references"])
+            match = any(w in ans for w in [
+                "safe", "can delete", "unused", "no references",
+                "can be removed", "can be safely", "not referenced",
+            ])
         else:
-            match = any(w in ans for w in ["not safe", "used", "referenced", "would break"])
+            match = any(w in ans for w in [
+                "not safe", "used", "referenced", "would break",
+                "cannot delete", "should not delete", "is referenced",
+            ])
         return 1.0 if match else 0.0, {"expected_safe": target, "match": match}
 
     if "file_count" in expected:
         expected_count = expected["file_count"]
         numbers = re.findall(r'\b(\d+)\b', answer)
         if str(expected_count) in numbers:
-            return 1.0, {"expected_count": expected_count, "found": True}
-        return 0.0, {"expected_count": expected_count, "found_numbers": numbers[:5]}
+            return 1.0, {"expected_count": expected_count, "found": True, "method": "explicit_number"}
+        listed_items = re.findall(r"['\"][\w./]+\.py['\"]", answer)
+        if not listed_items:
+            listed_items = re.findall(r"\b\w+\.py\b", answer)
+        if listed_items and len(listed_items) == expected_count:
+            return 1.0, {"expected_count": expected_count, "found": True, "method": "item_count", "items": listed_items}
+        return 0.0, {"expected_count": expected_count, "found_numbers": numbers[:5], "listed_items_count": len(listed_items)}
 
     return 0.5, {"note": "no specific boolean check matched"}
 
@@ -232,9 +277,11 @@ def evaluate_question(
     repo: SyntheticRepo,
     question: GroundTruthQuestion,
     config: AblationConfig,
+    *,
+    verbose: bool = False,
 ) -> SyntheticResult:
     """Evaluate a single ground-truth question against the agent."""
-    run_result = run_agent(repo_dir, question.question, config)
+    run_result = run_agent(repo_dir, question.question, config, verbose=verbose)
 
     if not run_result.success:
         return SyntheticResult(
@@ -250,7 +297,8 @@ def evaluate_question(
 
     scoring_method = ScoringMethod(question.scoring) if isinstance(question.scoring, str) else question.scoring
     scorer = SCORERS.get(scoring_method, score_contains_keywords)
-    score, details = scorer(run_result.answer, question.expected)
+    answer_text = run_result.answer if isinstance(run_result.answer, str) else str(run_result.answer)
+    score, details = scorer(answer_text, question.expected)
     passed = score >= 0.5
 
     return SyntheticResult(
@@ -298,6 +346,7 @@ def run_synthetic_evaluation(
     sizes: list[str] | None = None,
     max_tasks: int | None = None,
     progress_callback=None,
+    verbose: bool = False,
 ) -> list[SyntheticResult]:
     """Run the full synthetic evaluation for a given config.
 
@@ -330,7 +379,7 @@ def run_synthetic_evaluation(
 
                 repo_dir = write_repo(repo)
                 try:
-                    result = evaluate_question(str(repo_dir), repo, question, config)
+                    result = evaluate_question(str(repo_dir), repo, question, config, verbose=verbose)
                 finally:
                     cleanup_repo(repo_dir)
 

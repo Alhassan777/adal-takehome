@@ -211,6 +211,8 @@ def evaluate_task(
     task: SWEQATask,
     config: AblationConfig,
     repo_paths: dict[str, Path],
+    *,
+    verbose: bool = False,
 ) -> SWEQAResult:
     """Evaluate a single SWE-QA task."""
     repo_path = repo_paths.get(task.repo_name)
@@ -233,7 +235,7 @@ def evaluate_task(
         question=task.question,
     )
 
-    run_result = run_agent(str(repo_path), prompt, config)
+    run_result = run_agent(str(repo_path), prompt, config, verbose=verbose)
 
     return SWEQAResult(task=task, run_result=run_result)
 
@@ -346,6 +348,7 @@ def run_sweqa_evaluation(
     max_tasks: int | None = None,
     repos: list[str] | None = None,
     progress_callback=None,
+    verbose: bool = False,
 ) -> list[SWEQAResult]:
     """Run the full SWE-QA evaluation for a given config."""
     if not setup_sweqa_bench():
@@ -366,7 +369,7 @@ def run_sweqa_evaluation(
     results = []
     for i, task in enumerate(tasks):
         logger.info(f"[{i+1}/{len(tasks)}] {task.repo_name}: {task.question[:60]}...")
-        result = evaluate_task(task, config, repo_paths)
+        result = evaluate_task(task, config, repo_paths, verbose=verbose)
         results.append(result)
 
         if progress_callback:

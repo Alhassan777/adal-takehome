@@ -210,6 +210,8 @@ def evaluate_task_navigation(
     task: RepoQATask,
     config: AblationConfig,
     repos_dir: Path,
+    *,
+    verbose: bool = False,
 ) -> RepoQAResult:
     """Evaluate a single RepoQA task using navigation mode (Track B)."""
     repo_dir = repos_dir / task.repo.replace("/", "_")
@@ -218,7 +220,7 @@ def evaluate_task_navigation(
 
     question = REPOQA_PROMPT_TEMPLATE.format(description=task.description)
 
-    run_result = run_agent(str(repo_dir), question, config)
+    run_result = run_agent(str(repo_dir), question, config, verbose=verbose)
     extracted = extract_code_block(run_result.answer) if run_result.success else ""
 
     ground_truth = _extract_ground_truth(task)
@@ -262,6 +264,7 @@ def run_repoqa_evaluation(
     language: str = "python",
     max_tasks: int | None = None,
     progress_callback=None,
+    verbose: bool = False,
 ) -> list[RepoQAResult]:
     """Run the full RepoQA evaluation for a given config.
 
@@ -283,7 +286,7 @@ def run_repoqa_evaluation(
     results = []
     for i, task in enumerate(tasks):
         logger.info(f"[{i+1}/{len(tasks)}] {task.repo} :: {task.function_name}")
-        result = evaluate_task_navigation(task, config, REPOS_DIR)
+        result = evaluate_task_navigation(task, config, REPOS_DIR, verbose=verbose)
         results.append(result)
 
         if progress_callback:
