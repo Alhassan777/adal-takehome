@@ -1,7 +1,9 @@
 """CLI entry point for the codebase navigation agent."""
 
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 from rich.console import Console
@@ -12,6 +14,66 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+
+def _present_tool_suggestions(
+    result: dict[str, Any],
+    repo_path: str,
+    user_logger: Any | None,
+) -> None:
+    """Present suggested tools to the user and handle approval interactively.
+
+    Called after the RLM engine returns an answer that includes ``suggested_tools``.
+    Each proposal is rendered via the UserLogger, and the user is prompted
+    with [Y/n] per tool.  Approved tools go through the full
+    LearnedToolRegistry validation pipeline (deterministic tests + critic).
+    """
+    suggestions = result.get("suggested_tools")
+    if not suggestions:
+        return
+
+    from openai import OpenAI
+    from ..workflows.learned_tools import LearnedToolRegistry
+
+    client = OpenAI()
+    cache_dir = Path(repo_path) / ".cache"
+    registry = LearnedToolRegistry(cache_dir, client)
+
+    if user_logger:
+        user_logger.show_tool_suggestions_header(len(suggestions))
+
+    for idx, proposal in enumerate(suggestions, 1):
+        name = proposal.get("name", "unnamed")
+
+        if user_logger:
+            user_logger.show_tool_proposal(idx, proposal)
+
+        try:
+            choice = input(f"    Add to tool library? [Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n    [dim]Tool suggestions cancelled.[/dim]")
+            return
+
+        if choice in ("", "y", "yes"):
+            console.print("    [dim]Validating...[/dim]")
+            validation = registry.propose_tool(
+                name=name,
+                code=proposal.get("code", ""),
+                description=proposal.get("description", ""),
+                test_cases=proposal.get("test_cases", []),
+            )
+            if user_logger:
+                user_logger.show_tool_promotion_result(name, validation)
+            else:
+                approved = validation.get("approved", False)
+                feedback = validation.get("feedback", "")
+                tag = "[green]Validated[/green]" if approved else "[yellow]Rejected[/yellow]"
+                console.print(f"    {tag}: {feedback}")
+        else:
+            if user_logger:
+                user_logger.show_tool_skipped(name)
+            else:
+                console.print("    [dim]Skipped.[/dim]")
 
 
 @app.command()
@@ -155,7 +217,7 @@ def ask(
 ) -> None:
     """Ask a question about the codebase (auto-inits session if needed)."""
     import os
-    from ..config import ExecutionMode, SandboxMode
+    from ..config import ExecutionMode, SandboxMode, OPENAI_MODEL
     from ..workflows.engine import create_engine
     from .completer import parse_query
     from ..core.session import SessionConfig, get_or_init_session
@@ -165,23 +227,27 @@ def ask(
     execution_mode = ExecutionMode(mode)
     sandbox_mode = SandboxMode(sandbox)
 
+    dev_logger = None
+    if dev_log:
+        os.environ["CODEBASE_AGENT_DEV_LOG"] = "1"
+        dev_logger = DevLogger(model=OPENAI_MODEL)
+
     config = SessionConfig(
         use_lsp=not no_lsp,
         use_summaries=not no_summaries,
         execution_mode=execution_mode,
         sandbox_mode=sandbox_mode,
     )
-    session = get_or_init_session(repo_path, config=config)
+    profiler = dev_logger.index_profiler if dev_logger else None
+    session = get_or_init_session(repo_path, config=config, profiler=profiler)
+
+    if dev_logger and profiler and profiler.last_profile():
+        dev_logger.on_index_built(profiler.last_profile())
 
     user_logger = None
     if not quiet:
         verbosity = "verbose" if verbose else "normal"
         user_logger = UserLogger(verbosity=verbosity, console=console)
-
-    dev_logger = None
-    if dev_log:
-        os.environ["CODEBASE_AGENT_DEV_LOG"] = "1"
-        dev_logger = DevLogger()
 
     parsed = parse_query(question, session.mention_resolver)
 
@@ -201,6 +267,9 @@ def ask(
         console.print(f"\n[dim]Mode: {wf}[/dim]")
 
     console.print_json(data=result)
+
+    if not quiet:
+        _present_tool_suggestions(result, repo_path, user_logger)
 
     if dev_logger:
         wf_id = dev_logger.workflow_tracer.last_workflow_id()
@@ -224,7 +293,7 @@ def chat(
     """Interactive session: ask multiple questions in a long-lived REPL."""
     import os
     from prompt_toolkit import PromptSession
-    from ..config import ExecutionMode, SandboxMode
+    from ..config import ExecutionMode, SandboxMode, OPENAI_MODEL
     from ..workflows.engine import create_engine
     from .completer import AtMentionCompleter, parse_query
     from ..core.session import SessionConfig, get_or_init_session
@@ -234,6 +303,11 @@ def chat(
     execution_mode = ExecutionMode(mode)
     sandbox_mode = SandboxMode(sandbox)
 
+    session_dev_logger = None
+    if dev_log:
+        os.environ["CODEBASE_AGENT_DEV_LOG"] = "1"
+        session_dev_logger = DevLogger(model=OPENAI_MODEL)
+
     config = SessionConfig(
         use_lsp=not no_lsp,
         use_summaries=not no_summaries,
@@ -241,7 +315,11 @@ def chat(
         execution_mode=execution_mode,
         sandbox_mode=sandbox_mode,
     )
-    session = get_or_init_session(repo_path, config=config)
+    profiler = session_dev_logger.index_profiler if session_dev_logger else None
+    session = get_or_init_session(repo_path, config=config, profiler=profiler)
+
+    if session_dev_logger and profiler and profiler.last_profile():
+        session_dev_logger.on_index_built(profiler.last_profile())
 
     completer = AtMentionCompleter(session.mention_resolver)
     prompt_session: PromptSession = PromptSession(completer=completer)
@@ -268,11 +346,6 @@ def chat(
             verbosity = "verbose" if verbose else "normal"
             user_logger = UserLogger(verbosity=verbosity, console=console)
 
-        dev_logger = None
-        if dev_log:
-            os.environ["CODEBASE_AGENT_DEV_LOG"] = "1"
-            dev_logger = DevLogger()
-
         parsed = parse_query(question, session.mention_resolver)
 
         engine = create_engine(
@@ -281,7 +354,7 @@ def chat(
             root_path=session.root_path,
             lsp=session.lsp,
             sandbox=sandbox_mode,
-            dev_logger=dev_logger,
+            dev_logger=session_dev_logger,
             user_logger=user_logger,
         )
         result = engine.answer(parsed)
@@ -292,14 +365,25 @@ def chat(
 
         console.print_json(data=result)
 
-        if dev_logger:
-            wf_id = dev_logger.workflow_tracer.last_workflow_id()
+        if not quiet:
+            _present_tool_suggestions(result, repo_path, user_logger)
+
+        if session_dev_logger:
+            wf_id = session_dev_logger.workflow_tracer.last_workflow_id()
             if wf_id:
-                trace_path = dev_logger.export(wf_id, repo_path=repo_path)
+                trace_path = session_dev_logger.export(wf_id, repo_path=repo_path)
                 if trace_path:
                     console.print(f"[dim]Trace saved: {trace_path}[/dim]")
 
         console.print()
+
+    if session_dev_logger:
+        session_total = session_dev_logger.token_tracker.session_summary()
+        cost = session_dev_logger.cost_estimator.estimate(session_total)
+        console.print(
+            f"[dim]Session totals: {session_total.total_tokens} tokens, "
+            f"est. cost ${cost.total_cost_usd:.4f}[/dim]"
+        )
 
     session.shutdown()
     console.print("[dim]Session closed.[/dim]")
