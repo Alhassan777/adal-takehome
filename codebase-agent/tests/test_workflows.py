@@ -150,6 +150,23 @@ class TestClassifier:
         r = classify_question("Tell me more about that file", conversation_history=["prior context"])
         assert r.workflow == WorkflowType.FOLLOW_UP
 
+    # --- Tier 2: GOTO_DEFINITION without hint / without file ---
+
+    def test_goto_definition_no_hint(self):
+        r = classify_question("Go to definition of User in services.py")
+        assert r.workflow == WorkflowType.GOTO_DEFINITION_NO_HINT
+        assert r.extracted_params.get("symbol") == "user"
+        assert r.extracted_params.get("file") == "services.py"
+
+    def test_goto_definition_no_file(self):
+        r = classify_question("Go to definition of create_user")
+        assert r.workflow == WorkflowType.GOTO_DEFINITION_NO_FILE
+        assert r.extracted_params.get("symbol") == "create_user"
+
+    def test_goto_no_file_short_form(self):
+        r = classify_question("goto MyClass")
+        assert r.workflow == WorkflowType.GOTO_DEFINITION_NO_FILE
+
     # --- Fallback ---
 
     def test_ambiguous_defaults_to_explanation(self):
@@ -331,6 +348,61 @@ class TestAgentLoopEngine:
         assert "symbols_found" in summary
         assert "tools_called" in summary
         assert "confidence" in summary
+
+
+# ============================================================
+# Learned Tool Registry -- name validation
+# ============================================================
+
+
+class TestLearnedToolNameValidation:
+    """Verify that propose_tool rejects unsafe or invalid names."""
+
+    def test_rejects_path_traversal(self):
+        import tempfile
+        from unittest.mock import MagicMock
+        from codebase_agent.workflows.learned_tools import LearnedToolRegistry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reg = LearnedToolRegistry(Path(tmpdir), MagicMock())
+            result = reg.propose_tool("../../etc/passwd", "def x(): pass", "bad", [])
+            assert result["approved"] is False
+            assert "Invalid tool name" in result["feedback"]
+
+    def test_rejects_uppercase_name(self):
+        import tempfile
+        from unittest.mock import MagicMock
+        from codebase_agent.workflows.learned_tools import LearnedToolRegistry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reg = LearnedToolRegistry(Path(tmpdir), MagicMock())
+            result = reg.propose_tool("MyTool", "def MyTool(): pass", "desc", [])
+            assert result["approved"] is False
+
+    def test_rejects_empty_name(self):
+        import tempfile
+        from unittest.mock import MagicMock
+        from codebase_agent.workflows.learned_tools import LearnedToolRegistry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reg = LearnedToolRegistry(Path(tmpdir), MagicMock())
+            result = reg.propose_tool("", "def x(): pass", "desc", [])
+            assert result["approved"] is False
+
+    def test_accepts_valid_snake_case_name(self):
+        import tempfile
+        from unittest.mock import MagicMock
+        from codebase_agent.workflows.learned_tools import LearnedToolRegistry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reg = LearnedToolRegistry(Path(tmpdir), MagicMock())
+            result = reg.propose_tool(
+                "find_auth_views",
+                "def find_auth_views():\n    return 'ok'",
+                "Find auth views",
+                [{"input": {}, "expected_contains": "ok"}],
+            )
+            assert result["approved"] is not None
 
 
 # ============================================================
