@@ -1,11 +1,23 @@
 services:
   agent:
     build: .
+    env_file:
+      - .env
     volumes:
       - ./:/app
-      - ${REPO_PATH:-.}:/workspace/repo:ro
+      - ${REPO_PATH:-.}:/workspace/repo
       - ./.cache:/app/.cache
     environment:
       - PYTHONPATH=/app/src
+      - REPO_PATH=/workspace/repo
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - EXECUTION_MODE=${EXECUTION_MODE:-adaptive}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
+      - OPENAI_SUB_MODEL=${OPENAI_SUB_MODEL:-gpt-4o-mini}
+      - SUMMARY_LLM_MODEL=${SUMMARY_LLM_MODEL:-gpt-4o-mini}
+      - SUMMARY_BATCH_SIZE=${SUMMARY_BATCH_SIZE:-5}
+      - RLM_SANDBOX=${RLM_SANDBOX:-local}
       - CODEBASE_AGENT_DEV_LOG=${CODEBASE_AGENT_DEV_LOG:-0}
+    stdin_open: true
+    tty: true
     working_dir: /app
