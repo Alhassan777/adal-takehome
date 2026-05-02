@@ -276,6 +276,38 @@ def get_directory_summary(index, root_path, dir_path):
     return summary.model_dump()
 
 
+def find_routes(root_path, index, dir_path=""):
+    """Scan files for HTTP route decorator patterns (FastAPI, Flask, Django, etc.)."""
+    import re
+
+    _ROUTE_PATTERNS = [
+        re.compile(r"@(?:app|router|bp|blueprint|router_\w+)\.(get|post|put|patch|delete|head|options|route)\s*\("),
+        re.compile(r"@(?:api_view|action)\s*\("),
+        re.compile(r"path\s*\(\s*['\"]"),
+    ]
+
+    results = []
+    for f in index.files:
+        if dir_path and not f.path.startswith(dir_path.rstrip("/") + "/") and f.path != dir_path:
+            continue
+        abs_path = Path(root_path) / f.path
+        try:
+            content = abs_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        endpoints = []
+        for line_num, line in enumerate(content.splitlines(), 1):
+            for pat in _ROUTE_PATTERNS:
+                m = pat.search(line)
+                if m:
+                    endpoints.append({"line": line_num, "text": line.strip()})
+                    break
+        if endpoints:
+            results.append({"file": f.path, "endpoints": endpoints, "count": len(endpoints)})
+
+    return {"dir": dir_path or "(all)", "files_with_routes": [r["file"] for r in results], "details": results, "total_endpoints": sum(r["count"] for r in results)}
+
+
 def resolve_symbol(name, index, graph, context_file=None, context_position=None, expected_kind=None, lsp=None):
     """Import-aware, context-aware symbol resolver with 5-phase resolution."""
     candidates = [s for s in index.symbols if s.name == name]
