@@ -217,3 +217,5 @@ class UserSummary(BaseModel):
     tools_called: int = 0
     duration_seconds: float = 0.0
     confidence: str = ""
+    total_tokens: int = 0
+    est_cost_usd: float = 0.0
