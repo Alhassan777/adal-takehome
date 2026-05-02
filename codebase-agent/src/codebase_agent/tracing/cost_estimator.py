@@ -1,21 +1,25 @@
 """Token-to-USD cost estimation per model."""
 
+import logging
+
+from ..config import MODEL_PRICING, OPENAI_MODEL
 from ..models import CostEstimate, TokenSummary
 
-MODEL_PRICING: dict[str, tuple[float, float]] = {
-    "gpt-4o": (2.50 / 1_000_000, 10.00 / 1_000_000),
-    "gpt-4o-mini": (0.15 / 1_000_000, 0.60 / 1_000_000),
-    "claude-sonnet": (3.00 / 1_000_000, 15.00 / 1_000_000),
-    "claude-haiku": (0.25 / 1_000_000, 1.25 / 1_000_000),
-}
+logger = logging.getLogger("codebase_agent.cost")
 
 
 class CostEstimator:
-    def __init__(self, model: str = "gpt-4o-mini") -> None:
-        self.model = model
+    def __init__(self, model: str | None = None) -> None:
+        self.model = model or OPENAI_MODEL
 
     def estimate(self, token_summary: TokenSummary) -> CostEstimate:
         input_rate, output_rate = MODEL_PRICING.get(self.model, (0.0, 0.0))
+        if self.model and self.model not in MODEL_PRICING:
+            logger.warning(
+                "No pricing data for model %r; cost will report $0.00. "
+                "Add it to MODEL_PRICING in config.py.",
+                self.model,
+            )
         input_cost = token_summary.input_tokens * input_rate
         output_cost = token_summary.output_tokens * output_rate
 
